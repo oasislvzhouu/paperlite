@@ -26,7 +26,7 @@ export interface ReflowBlock {
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
   /** 首页元数据角色（对齐原版的结构化首页） */
-  role?: 'title' | 'authors' | 'abstract' | 'keywords' | 'meta'
+  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta'
 }
 
 interface RawTextItem {
@@ -360,6 +360,18 @@ function isFormulaLine(l: Line): boolean {
   return l.charMathRatio >= 0.08 && l.shortFragRatio >= 0.65 && l.fragCount >= 6
 }
 
+/** 文本模式章节标题：罗马数字/字母编号（"I. INTRODUCTION"、"A. Pseudo-Label"），
+ *  IEEE/Elsevier 小写大写章节标题字号与正文相同，字号启发式抓不到 */
+const SECTION_HEADING_RE = /^(?:[IVXLC]{1,5}|[A-Z])\.\s+\S+/
+function isSectionHeadingLine(l: Line): boolean {
+  if (l.text.length > 80) return false
+  if (!SECTION_HEADING_RE.test(l.text.trim())) return false
+  // 全大写或首字母大写的短标题，排除普通句子行（句子一般更长且含小写词开头后接逗号等）
+  const words = l.text.trim().split(/\s+/)
+  if (words.length > 12) return false
+  return /^[A-Z]/.test(l.text.trim())
+}
+
 /** 行流 → 语义块（标题/段落/公式/图片） */
 function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   const blocks: ReflowBlock[] = []
@@ -431,7 +443,8 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    const heading = isHeadingSize(l.fontSize) && !isFormulaLine(l)
+    const heading =
+      !isFormulaLine(l) && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
     const kind: 'heading' | 'paragraph' | 'formula' = isFormulaLine(l)
       ? 'formula'
       : heading
@@ -467,7 +480,13 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     if (bufT.length === 0) {
       bufPage = l.page
       bufKind = kind
-      bufLevel = heading ? levelFor(l.fontSize, bodySize) : 0
+      bufLevel = heading
+        ? isSectionHeadingLine(l)
+          ? /^[IVXLC]/.test(l.text.trim())
+            ? 2
+            : 3
+          : levelFor(l.fontSize, bodySize)
+        : 0
       bufLines = []
     }
     bufT.push(l.text)
@@ -715,13 +734,19 @@ function structureFirstPage(blocks: ReflowBlock[]): void {
       }
     )
   }
-  // 标题与摘要之间的正文段 → 作者/机构信息；版权碎块降级为 meta 弱化
+  // 标题与摘要之间的正文段 → 作者名 / 单位机构 / 版权碎块降级 meta
+  const AFFILIATION_RE =
+    /university|institute|department|college|laboratory|school of|dept\.|academy|@[a-z0-9.-]+\.(com|edu|cn|org)|\b(?:beijing|shanghai|nanjing|xi'?an|wuhan|changsha|harbin|hangzhou|hunan|guangdong|china)\b|中国|大学|学院|研究院|实验室/i
   const newAbsIdx = blocks.findIndex((b) => b.role === 'abstract')
   for (let i = 0; i < newAbsIdx; i++) {
     if (blocks[i].page === 1 && blocks[i].kind === 'paragraph' && !blocks[i].role) {
-      blocks[i].role = /©|all rights reserved|licensed use|doi|http/i.test(blocks[i].text)
-        ? 'meta'
-        : 'authors'
+      if (/©|all rights reserved|licensed use|doi|http/i.test(blocks[i].text)) {
+        blocks[i].role = 'meta'
+      } else if (AFFILIATION_RE.test(blocks[i].text) && !/member, ieee/i.test(blocks[i].text)) {
+        blocks[i].role = 'affiliation'
+      } else {
+        blocks[i].role = 'authors'
+      }
     }
   }
 }

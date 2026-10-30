@@ -12,26 +12,15 @@ const WIDTHS = [
   { em: 56, label: '宽' },
   { em: 72, label: '超宽' }
 ]
-let widthIdx = 0
-
-function clampInt(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v))
-}
-
-function initWidth(): void {
-  const saved = Number(localStorage.getItem('pl-width'))
-  widthIdx = Number.isInteger(saved) && saved >= 0 && saved <= 2 ? saved : 1
-}
+// 启动默认「超宽」（对齐原版），会话内可临时切换
+let widthIdx = WIDTHS.length - 1
 
 function applyWidth(): void {
-  // 默认「超宽」（对齐原版），首次无记录时取最后一档
-  if (localStorage.getItem('pl-width') === null) widthIdx = WIDTHS.length - 1
   const w = WIDTHS[widthIdx]
   $('#reflow-article').style.setProperty('--reflow-width', `${w.em}em`)
   const btn = $('#width-btn')
   btn.textContent = w.label
   btn.title = `版面宽度：${w.label}（${w.em}em，点击切换）`
-  localStorage.setItem('pl-width', String(widthIdx))
 }
 
 interface TocEntry {
