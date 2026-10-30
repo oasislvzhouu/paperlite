@@ -23,6 +23,8 @@ export interface ReflowBlock {
   images?: string[]
   /** 公式块：页面上的源区域（pt，y 自页顶向下），用于裁图送 LLM 识别 LaTeX */
   rect?: { x0: number; x1: number; y0: number; y1: number }
+  /** 块首行距页顶位置（pt），供图片异步插入时对位 */
+  top?: number
 }
 
 interface RawTextItem {
@@ -68,7 +70,7 @@ interface Frag {
   isMath: boolean
 }
 
-interface Line {
+export interface Line {
   page: number
   /** 距页顶的距离（pt） */
   yTop: number
@@ -174,9 +176,9 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
   let curY = Number.NaN
   let groupMax = 0
   for (const f of sorted) {
-    // 容差按「当前组最大字号与自身字号的较大者」：7pt 下标离 10pt 主基线可偏 4pt+，
-    // 若按自身字号算容差会把下标甩出行（如 W_t 的 t）
-    const tol = Math.max(2, 0.45 * Math.max(f.fontSize, groupMax))
+    // 容差：下标并入主行需要 0.45×主字号（但整体封顶 6pt，
+    // 否则大字号行（如 18pt 标题）的容差会把下一行（作者行）也吸进来）
+    const tol = Math.max(2, 0.45 * f.fontSize, Math.min(0.45 * groupMax, 6))
     if (cur.length === 0 || Math.abs(f.y - curY) <= tol) {
       cur.push(f)
       if (cur.length === 1) curY = f.y
@@ -371,6 +373,7 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           y1: Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6)))
         }
       }
+      if (bufLines[0]) block.top = bufLines[0].yTop
       blocks.push(block)
     }
     bufT = []
@@ -524,22 +527,31 @@ export function extractImageRects(
   return rects
 }
 
-/** 浏览器环境：整页渲染后按矩形裁剪出图片 dataURL */
-async function cropPageImages(
+/** 浏览器环境：整页渲染后按矩形裁剪出图片 dataURL（导出给阅读器渐进插入用） */
+/** pdf.js 算子码（由调用方传入，避免本模块二次 import pdfjs-dist 造成双实例） */
+export interface PdfOpsCodes {
+  save: number
+  restore: number
+  transform: number
+  paintImageXObject: number
+  paintInlineImageXObject: number
+}
+
+export async function cropPageImages(
   page: import('pdfjs-dist').PDFPageProxy,
   viewportW: number,
-  viewportH: number
+  viewportH: number,
+  ops: PdfOpsCodes
 ): Promise<Line[]> {
   if (typeof document === 'undefined') return []
-  const { OPS } = await import('pdfjs-dist')
-  const opList = await page.getOperatorList()
-  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], {
-    save: OPS.save,
-    restore: OPS.restore,
-    transform: OPS.transform,
-    paintImageXObject: OPS.paintImageXObject,
-    paintInlineImageXObject: OPS.paintInlineImageXObject
+  const g = globalThis as { __plImgRects?: Record<number, number>; __plImgErr?: Record<number, string> }
+  const opList = await page.getOperatorList().catch((e: unknown) => {
+    g.__plImgErr = { ...(g.__plImgErr ?? {}), [page.pageNumber]: String(e) }
+    return null
   })
+  if (!opList) return []
+  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops)
+  g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
   if (rects.length === 0) return []
 
   const scale = Math.min(2, 1100 / viewportW)
@@ -549,7 +561,24 @@ async function cropPageImages(
   canvas.height = Math.floor(viewport.height)
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
-  await page.render({ canvasContext: ctx, viewport }).promise
+  // 渲染带取消的超时护栏：个别页 render 在 worker 上可能永不返回，
+  // 必须取消渲染任务释放页面，否则堆积的挂起任务会拖垮后续所有页
+  const renderTask = page.render({ canvasContext: ctx, viewport })
+  try {
+    await Promise.race([
+      renderTask.promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('render-timeout')), 3500))
+    ])
+  } catch (err) {
+    try {
+      renderTask.cancel()
+    } catch {
+      /* cancel 可能再抛 RenderingCancelledException，忽略 */
+    }
+    const g4 = globalThis as { __plImgRenderErr?: Record<number, string> }
+    g4.__plImgRenderErr = { ...(g4.__plImgRenderErr ?? {}), [page.pageNumber]: String(err) }
+    return []
+  }
 
   const lines: Line[] = []
   for (const r of rects) {
@@ -586,6 +615,8 @@ async function cropPageImages(
       image: out.toDataURL('image/jpeg', 0.85)
     })
   }
+  const g2 = globalThis as { __plImgLines?: Record<number, number> }
+  g2.__plImgLines = { ...(g2.__plImgLines ?? {}), [page.pageNumber]: lines.length }
   return lines
 }
 
@@ -642,14 +673,6 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
       })
     }
     const lines = fragsToLines(frags, vp.height, p)
-    // 图片行（仅浏览器；Node 单测跳过）
-    try {
-      const imgLines = await cropPageImages(page, vp.width, vp.height)
-      for (const il of imgLines) il.page = p
-      lines.push(...imgLines)
-    } catch (err) {
-      console.warn('[paperlite] 图片提取失败（忽略）', err)
-    }
     perPage.push({ lines, height: vp.height, width: vp.width })
   }
 

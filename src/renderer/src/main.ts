@@ -7,7 +7,11 @@ import type { ReadingMeta } from '../../shared/types'
 
 // 内联 worker（自带 toHex polyfill），不再依赖外部 workerSrc 资源路径
 const pdfWorker = new PdfjsWorker()
-pdfWorker.onerror = (e) => console.error('[paperlite] pdf worker 启动失败:', e.message ?? e)
+pdfWorker.onerror = (e) => {
+  const g = globalThis as { __plWorkerErr?: string[] }
+  g.__plWorkerErr = [...(g.__plWorkerErr ?? []), String(e.message ?? e)]
+  console.error('[paperlite] pdf worker 启动失败:', e.message ?? e)
+}
 pdfjsLib.GlobalWorkerOptions.workerPort = pdfWorker
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T

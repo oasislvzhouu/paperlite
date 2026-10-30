@@ -77,6 +77,56 @@ button.toggle-on { background: rgba(79, 140, 255, 0.2); border-color: var(--acce
   align-content: start;
 }
 
+/* ── 目录面板 ─────────────────────────── */
+
+#reader { position: relative; }
+
+#toc-panel {
+  position: absolute;
+  top: 49px;
+  left: 0;
+  bottom: 0;
+  width: 280px;
+  z-index: 20;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.toc-head {
+  padding: 14px 18px 10px;
+  font-weight: 700;
+  font-size: 15px;
+  border-bottom: 1px solid var(--line);
+}
+#toc-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 6px 16px;
+}
+.toc-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: 13px/1.45 inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toc-item:hover { background: var(--panel-2); color: var(--text); }
+.toc-item.l1 { font-weight: 600; color: var(--text); }
+.toc-item.l2 { padding-left: 22px; }
+.toc-item.l3 { padding-left: 36px; }
+.toc-item .toc-pg { float: right; margin-left: 8px; font-size: 11px; opacity: 0.6; }
+
 /* ── 细节打磨 ─────────────────────────── */
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -197,25 +247,44 @@ body.reflow-mode .zoomer { display: none; }
 
 #reflow-article {
   --reflow-font: 17px;
-  max-width: 42em;
+  --reflow-width: 56em;
+  max-width: var(--reflow-width);
   margin: 28px auto 0;
   font-family: var(--font-article);
   font-size: var(--reflow-font);
-  line-height: 1.85;
+  line-height: 1.8;
   color: var(--text);
   letter-spacing: 0.2px;
   padding-bottom: 60px;
+  transition: max-width 0.2s ease;
 }
-#reflow-article p { margin: 0 0 0.95em; text-align: justify; hyphens: auto; }
-#reflow-article h1, #reflow-article h2, #reflow-article h3, #reflow-article h4 {
-  margin: 1.7em 0 0.65em;
+/* 对齐 Scholaread SR-Article 实测参数：首行缩进 2em、段落边距、标题层次 */
+#reflow-article p {
+  margin: 1em 0;
+  text-align: justify;
+  hyphens: auto;
+  text-indent: 2em;
+}
+#reflow-article p.trans { text-indent: 0; }
+#reflow-article h1,
+#reflow-article h2,
+#reflow-article h3,
+#reflow-article h4 {
+  margin: 1.6em 0 0.7em;
   line-height: 1.35;
   font-family: inherit;
   color: #fff;
+  text-indent: 0;
 }
-#reflow-article h1 { font-size: 1.55em; }
-#reflow-article h2 { font-size: 1.3em; }
-#reflow-article h3 { font-size: 1.13em; }
+#reflow-article h1 {
+  font-size: 1.5em;
+  text-align: center;
+  margin: 2em 0 1.2em;
+  padding-bottom: 0.8em;
+  border-bottom: 1px solid var(--line);
+}
+#reflow-article h2 { font-size: 1.28em; margin-top: 1.5em; }
+#reflow-article h3 { font-size: 1.12em; margin-top: 1.8em; }
 #reflow-article h4 { font-size: 1.02em; }
 .reflow-notice {
   margin: 40px auto;
@@ -250,13 +319,13 @@ body.reflow-mode .zoomer { display: none; }
 }
 #reflow-article .formula.katex-ok .katex { font-size: 1.12em; }
 
-/* 图片块：PDF 图表裁剪插入 */
+/* 图片块：PDF 图表裁剪插入（对齐原版：近乎全宽） */
 #reflow-article figure.figure {
   margin: 1.4em auto;
   text-align: center;
 }
 #reflow-article figure.figure img {
-  max-width: 100%;
+  width: calc(100% - 2.5rem);
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;

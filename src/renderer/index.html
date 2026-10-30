@@ -26,6 +26,7 @@
       <section id="reader" hidden>
         <div id="reader-toolbar">
           <button id="back-btn" title="返回书架">← 书架</button>
+          <button id="toc-btn" title="目录">☰ 目录</button>
           <div id="reader-title" class="ellipsis"></div>
           <div class="modes">
             <button id="reflow-btn" class="toggle-on" title="排版模式（重排为流式文本）">排版</button>
@@ -39,6 +40,7 @@
           </div>
           <div class="fonter reflow-only">
             <button id="translate-btn" title="AI 翻译（GLM，双语对照）">译</button>
+            <button id="width-btn" title="切换版面宽度">宽</button>
             <button id="font-dec" title="缩小字号">A−</button>
             <button id="font-inc" title="放大字号">A＋</button>
           </div>
@@ -48,6 +50,10 @@
             <button id="zoom-in-btn" title="放大">＋</button>
           </div>
         </div>
+        <nav id="toc-panel" hidden>
+          <div class="toc-head">目录</div>
+          <div id="toc-list"></div>
+        </nav>
         <div id="page-wrap"><canvas id="pdf-canvas"></canvas></div>
         <div id="reflow-wrap" hidden>
           <div id="reflow-loading" hidden>正在解析排版…</div>

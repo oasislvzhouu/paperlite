@@ -2,9 +2,101 @@ import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
-import { extractReflowBlocks, type ReflowBlock } from './reflow'
+import { extractReflowBlocks, cropPageImages, type ReflowBlock } from './reflow'
 
 type Mode = 'reflow' | 'original'
+
+/** 版面宽度三档（对齐原版可调宽度），localStorage 持久化 */
+const WIDTHS = [
+  { em: 42, label: '窄' },
+  { em: 56, label: '宽' },
+  { em: 72, label: '超宽' }
+]
+let widthIdx = 0
+
+function clampInt(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v))
+}
+
+function initWidth(): void {
+  const saved = Number(localStorage.getItem('pl-width'))
+  widthIdx = Number.isInteger(saved) && saved >= 0 && saved <= 2 ? saved : 1
+}
+
+function applyWidth(): void {
+  if (widthIdx === 0 && localStorage.getItem('pl-width') === null) widthIdx = 1 // 默认「宽」
+  const w = WIDTHS[widthIdx]
+  $('#reflow-article').style.setProperty('--reflow-width', `${w.em}em`)
+  const btn = $('#width-btn')
+  btn.textContent = w.label
+  btn.title = `版面宽度：${w.label}（${w.em}em，点击切换）`
+  localStorage.setItem('pl-width', String(widthIdx))
+}
+
+interface TocEntry {
+  title: string
+  page: number
+  level: number
+  /** 由标题块生成的条目：跳转到对应元素 */
+  bi?: number
+}
+let toc: TocEntry[] = []
+
+async function loadOutline(d: PDFDocumentProxy): Promise<TocEntry[]> {
+  const out: TocEntry[] = []
+  const walk = async (items: Array<{ title?: string; dest?: unknown; items?: unknown[] }>, level: number): Promise<void> => {
+    for (const it of items) {
+      let page = 0
+      try {
+        if (it.dest) {
+          const dest = typeof it.dest === 'string' ? await d.getDestination(it.dest) : it.dest
+          if (Array.isArray(dest) && dest[0] != null) {
+            const idx = typeof dest[0] === 'object'
+            ? await d.getPageIndex(dest[0] as Parameters<typeof d.getPageIndex>[0])
+            : (dest[0] as number)
+            page = idx + 1
+          }
+        }
+      } catch {
+        /* 单个书签解析失败忽略 */
+      }
+      out.push({ title: it.title ?? '', page, level })
+      if (Array.isArray(it.items) && it.items.length > 0) await walk(it.items as never, level + 1)
+    }
+  }
+  let items: Array<{ title?: string; dest?: unknown; items?: unknown[] }> = []
+  try {
+    items = (await d.getOutline()) ?? []
+  } catch {
+    items = []
+  }
+  await walk(items, 1)
+  if (out.length === 0 && blocks) {
+    // PDF 无内嵌书签 → 用重排引擎识别的标题生成目录
+    blocks.forEach((b, bi) => {
+      if (b.kind === 'heading' && b.text.trim().length > 1) {
+        out.push({ title: b.text, page: b.page, level: clamp(b.level ?? 2, 1, 3), bi })
+      }
+    })
+  }
+  return out
+}
+
+function renderToc(): void {
+  const list = $('#toc-list')
+  if (toc.length === 0) {
+    list.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:13px;">此 PDF 没有内嵌书签目录</div>'
+    return
+  }
+  const esc = (s: string): string =>
+    s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string)
+  list.innerHTML = toc
+    .map(
+      (t, i) =>
+        `<button class="toc-item l${clamp(t.level, 1, 3)}" data-i="${i}">${esc(t.title)}<span class="toc-pg">${t.page || ''}</span></button>`
+    )
+    .join('')
+}
 
 let doc: PDFDocumentProxy | null = null
 let task: pdfjsLib.PDFDocumentLoadingTask | null = null
@@ -71,12 +163,16 @@ export async function openReader(id: number): Promise<void> {
   applyMode()
   if (mode === 'reflow') {
     renderReflow()
+    applyWidth()
     goTo(pageNum)
     void hydrateTranslations()
-    void upgradeFormulas()
+    void attachImages().then(() => void upgradeFormulas())
   } else {
+    applyWidth()
     void render()
   }
+  toc = await loadOutline(doc)
+  renderToc()
   void window.paperlite.saveProgress(id, pageNum, doc.numPages)
 }
 
@@ -127,6 +223,54 @@ function renderReflow(): void {
   article.innerHTML = parts.join('\n')
   article.style.setProperty('--reflow-font', `${reflowFont}px`)
   article.classList.remove('show-trans', 'has-trans')
+}
+
+/** 渐进图片挂载：文本渲染后逐页补图（单页 4s 护栏，失败不影响阅读） */
+function insertFigure(pageNo: number, yTop: number, dataUrl: string): void {
+  const article = $('#reflow-article')
+  if (!blocks) return
+  const key = `${pageNo}-${Math.round(yTop)}`
+  if (article.querySelector(`figure[data-key="${key}"]`)) return
+  const fig = document.createElement('figure')
+  fig.className = 'figure'
+  fig.dataset['key'] = key
+  const img = document.createElement('img')
+  img.src = dataUrl
+  fig.appendChild(img)
+  // 插到同页第一个 top >= 图片顶的块之前；没有则放页尾（下一页分隔符前）
+  const anchor = blocks
+    .map((b, bi) => ({ b, bi }))
+    .find((x) => x.b.page === pageNo && x.b.top !== undefined && x.b.top >= yTop)
+  const anchorEl = anchor ? article.querySelector(`[data-bi="${anchor.bi}"]`) : null
+  if (anchorEl?.parentNode) {
+    anchorEl.parentNode.insertBefore(fig, anchorEl)
+  } else {
+    const nextSep = article.querySelector(`.page-sep[data-page="${pageNo + 1}"]`)
+    if (nextSep) article.insertBefore(fig, nextSep)
+    else article.appendChild(fig)
+  }
+}
+
+async function attachImages(): Promise<void> {
+  if (!doc || mode !== 'reflow') return
+  for (let p = 1; p <= doc.numPages; p++) {
+    if (readingId === 0) return
+    try {
+      const page = await doc.getPage(p)
+      const vp = page.getViewport({ scale: 1 })
+      const imgs = await Promise.race([
+        cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS),
+        new Promise<Array<{ yTop: number; image?: string }>>((resolve) =>
+          setTimeout(() => resolve([]), 15000)
+        )
+      ])
+      for (const im of imgs) {
+        if (im.image) insertFigure(p, im.yTop, im.image)
+      }
+    } catch {
+      /* 单页失败跳过 */
+    }
+  }
 }
 
 /* ── 公式 LaTeX 升级：裁源图 → LLM 视觉识别 → KaTeX 渲染 ── */
@@ -420,6 +564,28 @@ export function initReaderEvents(refreshShelf: () => void): void {
     $('#reflow-article').style.setProperty('--reflow-font', `${reflowFont}px`)
   })
   $('#translate-btn').addEventListener('click', () => void translateFlow())
+  $('#width-btn').addEventListener('click', () => {
+    widthIdx = (widthIdx + 1) % WIDTHS.length
+    applyWidth()
+  })
+  $('#toc-btn').addEventListener('click', () => {
+    const p = $('#toc-panel')
+    p.hidden = !p.hidden
+    $('#toc-btn').classList.toggle('toggle-on', !p.hidden)
+  })
+  $('#toc-list').addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('.toc-item')
+    if (!btn) return
+    const entry = toc[Number(btn.dataset['i'])]
+    if (!entry) return
+    if (entry.bi !== undefined && mode === 'reflow') {
+      $(`#reflow-article [data-bi="${entry.bi}"]`)?.scrollIntoView({ block: 'start' })
+    } else if (entry.page > 0) {
+      goTo(entry.page)
+    }
+    $('#toc-panel').hidden = true
+    $('#toc-btn').classList.remove('toggle-on')
+  })
 
   $('#zoom-in-btn').addEventListener('click', () => {
     zoom = clamp(zoom * 1.2, 0.3, 5)
