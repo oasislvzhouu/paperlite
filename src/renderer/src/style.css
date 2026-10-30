@@ -1,0 +1,293 @@
+:root {
+  --bg: #14161a;
+  --panel: #1d2026;
+  --panel-2: #24282f;
+  --line: #2e333c;
+  --text: #e8eaed;
+  --muted: #9aa1ab;
+  --accent: #409eff;
+  --accent-weak: rgba(64, 158, 255, 0.16);
+  --danger: #e5484d;
+  --radius: 10px;
+  --font-article: Georgia, 'Times New Roman', 'Songti SC', SimSun, serif;
+  --font-math: 'Cambria Math', 'STIX Two Math', 'Latin Modern Math', 'Times New Roman', serif;
+}
+
+* { box-sizing: border-box; }
+
+/* 关键：显式 display 规则会覆盖 hidden 属性的 UA 样式，必须全局强制 */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger:hover { border-color: var(--danger); color: var(--danger); }
+button.toggle-on { background: rgba(79, 140, 255, 0.2); border-color: var(--accent); color: var(--accent); }
+
+/* ── 书架 ─────────────────────────────── */
+
+#shelf-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.brand { font-size: 17px; font-weight: 700; letter-spacing: 0.3px; }
+.brand-sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 6px; }
+#search {
+  flex: 1;
+  max-width: 360px;
+  margin-left: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 12px;
+}
+
+#shelf {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  padding: 20px;
+  align-content: start;
+}
+
+/* ── 细节打磨 ─────────────────────────── */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: #3a4150; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.card:hover {
+  border-color: var(--accent);
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.thumb {
+  height: 150px;
+  background: #0e1013;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.thumb img { max-height: 100%; max-width: 100%; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5); }
+.thumb-fallback { font-size: 42px; opacity: 0.5; }
+
+.card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+.card-title { font-weight: 600; }
+.card-meta { color: var(--muted); font-size: 12px; min-height: 18px; }
+.card-actions { display: flex; gap: 8px; }
+.card-actions .open-btn { flex: 1; }
+
+#empty-tip {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  pointer-events: none;
+}
+.empty-icon { font-size: 56px; margin-bottom: 8px; }
+
+/* ── 阅读器 ───────────────────────────── */
+
+#reader { display: flex; flex-direction: column; height: 100vh; }
+
+#reader-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+#reader-title { flex: 1; font-weight: 600; }
+.pager, .zoomer { display: flex; align-items: center; gap: 6px; }
+#page-input {
+  width: 56px;
+  text-align: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+
+#page-wrap {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+}
+#pdf-canvas {
+  background: #fff;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+  max-width: none;
+}
+
+/* ── 排版（reflow）模式 ─────────────────── */
+
+.reflow-only { display: none; }
+body.reflow-mode .reflow-only { display: flex; }
+body.reflow-mode .zoomer { display: none; }
+.modes { display: flex; gap: 4px; }
+.fonter { align-items: center; gap: 6px; }
+#font-dec, #font-inc { min-width: 40px; }
+
+#reflow-wrap {
+  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 24px 80px;
+}
+
+#reflow-loading {
+  position: sticky;
+  top: 12px;
+  z-index: 2;
+  margin: 12px auto 0;
+  width: fit-content;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#reflow-article {
+  --reflow-font: 17px;
+  max-width: 42em;
+  margin: 28px auto 0;
+  font-family: var(--font-article);
+  font-size: var(--reflow-font);
+  line-height: 1.85;
+  color: var(--text);
+  letter-spacing: 0.2px;
+  padding-bottom: 60px;
+}
+#reflow-article p { margin: 0 0 0.95em; text-align: justify; hyphens: auto; }
+#reflow-article h1, #reflow-article h2, #reflow-article h3, #reflow-article h4 {
+  margin: 1.7em 0 0.65em;
+  line-height: 1.35;
+  font-family: inherit;
+  color: #fff;
+}
+#reflow-article h1 { font-size: 1.55em; }
+#reflow-article h2 { font-size: 1.3em; }
+#reflow-article h3 { font-size: 1.13em; }
+#reflow-article h4 { font-size: 1.02em; }
+.reflow-notice {
+  margin: 40px auto;
+  max-width: 32em;
+  color: var(--muted);
+  text-align: center;
+  font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+
+/* 公式块：数学字体独立排版（引擎按嵌入数学字体识别） */
+#reflow-article .formula {
+  font-family: var(--font-math);
+  font-size: 0.98em;
+  text-align: center;
+  direction: ltr;
+  margin: 1.1em auto;
+  padding: 0.55em 1em;
+  max-width: fit-content;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+#reflow-article .formula sub, #reflow-article .formula sup,
+#reflow-article p sub, #reflow-article p sup {
+  font-size: 0.72em;
+}
+/* LLM 识别成功后的 KaTeX 公式 */
+#reflow-article .formula.katex-ok {
+  font-family: var(--font-math);
+  padding: 0.7em 1.1em;
+}
+#reflow-article .formula.katex-ok .katex { font-size: 1.12em; }
+
+/* 图片块：PDF 图表裁剪插入 */
+#reflow-article figure.figure {
+  margin: 1.4em auto;
+  text-align: center;
+}
+#reflow-article figure.figure img {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: block;
+  margin: 0 auto 4px;
+}
+#reflow-article figure.figure img + img { margin-top: 6px; }
+
+/* AI 双语对照：译文默认隐藏，show-trans 时显示 */
+#reflow-article p.trans {
+  display: none;
+  margin: -0.35em 0 1.05em;
+  padding: 0.5em 0.9em;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-weak);
+  border-radius: 0 8px 8px 0;
+  color: #cfe4ff;
+  font-size: 0.92em;
+  line-height: 1.75;
+  text-align: justify;
+  font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+#reflow-article.show-trans p.trans { display: block; }
+
+.page-sep {
+  margin: 2.4em auto 1.6em;
+  width: fit-content;
+  padding: 2px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}

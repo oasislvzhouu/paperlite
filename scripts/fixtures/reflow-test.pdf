@@ -1,0 +1,91 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 629 >>
+stream
+BT /F1 10 Tf 72 750 Td (Sample Journal of Testing Vol 42) Tj ET
+BT /F1 18 Tf 72 700 Td (A Study of Reflow Engines) Tj ET
+BT /F1 10 Tf 72 660 Td (Reflow engines reconstruct) Tj ET
+BT /F1 10 Tf 72 646 Td (the reading order of two) Tj ET
+BT /F1 10 Tf 72 632 Td (column academic papers.) Tj ET
+BT /F1 10 Tf 72 600 Td (Second paragraph starts here) Tj ET
+BT /F1 10 Tf 72 586 Td (after a clear vertical gap.) Tj ET
+BT /F1 10 Tf 316 660 Td (Right column line one alpha.) Tj ET
+BT /F1 10 Tf 316 646 Td (Right column line two beta.) Tj ET
+BT /F1 10 Tf 316 632 Td (Right column line three ends.) Tj ET
+BT /F1 10 Tf 280 40 Td (Page 1) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 787 >>
+stream
+BT /F1 10 Tf 72 750 Td (Sample Journal of Testing Vol 42) Tj ET
+BT /F1 10 Tf 72 660 Td (Page two left column text) Tj ET
+BT /F1 10 Tf 72 646 Td (continues the document body) Tj ET
+BT /F1 10 Tf 72 632 Td (with several more lines.) Tj ET
+BT /F1 10 Tf 72 618 Td (Fourth line keeps it wide.) Tj ET
+BT /F1 10 Tf 72 604 Td (Fifth line of the column.) Tj ET
+BT /F1 10 Tf 72 590 Td (Sixth line ends the block.) Tj ET
+BT /F1 10 Tf 316 660 Td (Page two right column text) Tj ET
+BT /F1 10 Tf 316 646 Td (also continues nicely and) Tj ET
+BT /F1 10 Tf 316 632 Td (keeps the gutter intact) Tj ET
+BT /F1 10 Tf 316 618 Td (with enough total lines) Tj ET
+BT /F1 10 Tf 316 604 Td (for two column detection) Tj ET
+BT /F1 10 Tf 316 590 Td (to engage as expected.) Tj ET
+BT /F1 10 Tf 280 40 Td (Page 2) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 746 >>
+stream
+BT /F1 10 Tf 72 750 Td (Sample Journal of Testing Vol 42) Tj ET
+BT /F1 10 Tf 72 660 Td (Page three tests the hy-) Tj ET
+BT /F1 10 Tf 72 646 Td (phenation join behavior) Tj ET
+BT /F1 10 Tf 72 632 Td (across a broken word.) Tj ET
+BT /F1 10 Tf 72 618 Td (Another line here.) Tj ET
+BT /F1 10 Tf 72 604 Td (And one more line.) Tj ET
+BT /F1 10 Tf 72 590 Td (Final left column line.) Tj ET
+BT /F1 10 Tf 316 660 Td (Page three right column) Tj ET
+BT /F1 10 Tf 316 646 Td (carries simple body text) Tj ET
+BT /F1 10 Tf 316 632 Td (to balance the layout) Tj ET
+BT /F1 10 Tf 316 618 Td (and reach the required) Tj ET
+BT /F1 10 Tf 316 604 Td (line count for the) Tj ET
+BT /F1 10 Tf 316 590 Td (detection heuristic.) Tj ET
+BT /F1 10 Tf 280 40 Td (Page 3) Tj ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000133 00000 n 
+0000000203 00000 n 
+0000000329 00000 n 
+0000001009 00000 n 
+0000001135 00000 n 
+0000001973 00000 n 
+0000002099 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+2896
+%%EOF

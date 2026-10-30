@@ -1,0 +1,34 @@
+{
+  "name": "paperlite",
+  "version": "0.1.0",
+  "description": "PaperLite — 轻量文献阅读器（Phase 1 骨架：Electron + Vite + pdf.js + better-sqlite3）",
+  "main": "out/main/index.js",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "smoke": "electron-vite build && electron . --smoke",
+    "test:reflow": "node scripts/test-reflow.mjs",
+    "fixtures": "python scripts/make_test_pdf.py"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "katex": "^0.19.1",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/katex": "^0.16.8",
+    "@types/node": "^26.6.6",
+    "electron": "^37.10.3",
+    "electron-vite": "^6.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vite-plugin-static-copy": "^4.1.1"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.3": true,
+    "electron@37.10.3": true
+  }
+}
