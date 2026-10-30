@@ -97,6 +97,10 @@ export interface Line {
 
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
 
+/** 版权/授权样板文字（出版社首页边栏/页脚，不属于正文内容） */
+const COPYRIGHT_LINE_RE =
+  /rights\/index\.html|all rights reserved|authorized licensed use|personal use is permitted|requires IEEE permission|^\s*\d{4}-\d{3,5}[XS]?\s?©|©\s*\d{4}\s+(IEEE|Elsevier|Springer|The Author|by Elsevier)|ieee\.org\/publications|downloaded from (ieee )?xplore|版权所有|未经.{0,10}许可.{0,10}(转载|翻印|复制)/i
+
 function escapeHtmlStr(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
@@ -746,7 +750,9 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
         isMath: isMathFontFamily(fam) || looksLikeMathText(it.str)
       })
     }
-    const lines = fragsToLines(frags, vp.height, p)
+    const lines = fragsToLines(frags, vp.height, p).filter(
+      (l) => !COPYRIGHT_LINE_RE.test(l.text)
+    )
     perPage.push({ lines, height: vp.height, width: vp.width })
   }
 
