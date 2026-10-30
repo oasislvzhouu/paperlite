@@ -24,7 +24,8 @@ function initWidth(): void {
 }
 
 function applyWidth(): void {
-  if (widthIdx === 0 && localStorage.getItem('pl-width') === null) widthIdx = 1 // 默认「宽」
+  // 默认「超宽」（对齐原版），首次无记录时取最后一档
+  if (localStorage.getItem('pl-width') === null) widthIdx = WIDTHS.length - 1
   const w = WIDTHS[widthIdx]
   $('#reflow-article').style.setProperty('--reflow-width', `${w.em}em`)
   const btn = $('#width-btn')
@@ -215,9 +216,11 @@ function renderReflow(): void {
       parts.push(`<figure class="figure" data-bi="${bi}">${imgs}</figure>`)
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
-      parts.push(`<h${lvl} data-bi="${bi}">${body}</h${lvl}>`)
+      const roleCls = b.role ? ` ${b.role}` : ''
+      parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}">${body}</h${lvl}>`)
     } else {
-      parts.push(`<p data-bi="${bi}">${body}</p>`)
+      const roleCls = b.role ? ` ${b.role}` : ''
+      parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}">${body}</p>`)
     }
   })
   article.innerHTML = parts.join('\n')

@@ -294,6 +294,63 @@ body.reflow-mode .zoomer { display: none; }
   font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
 }
 
+/* 首字下沉（drop cap，IEEE 引言的大号首字母） */
+#reflow-article .dc {
+  float: left;
+  font-size: 2.7em;
+  line-height: 0.85;
+  padding: 0.04em 0.12em 0 0;
+  font-weight: 700;
+  font-family: var(--font-article);
+}
+
+/* 首页元数据结构化（对齐原版：标题/作者/摘要/关键词分区） */
+#reflow-article h1.title {
+  font-size: 1.6em;
+  text-align: center;
+  margin: 1.2em 0 1em;
+}
+#reflow-article p.authors {
+  text-align: center;
+  text-indent: 0;
+  color: var(--muted);
+  font-size: 0.92em;
+  margin: 0.45em 0;
+}
+#reflow-article p.abstract {
+  text-indent: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 0.7em 1em;
+  font-size: 0.95em;
+}
+#reflow-article p.abstract::before {
+  content: '摘要　';
+  font-weight: 700;
+  color: var(--accent);
+}
+#reflow-article p.keywords {
+  text-indent: 0;
+  font-size: 0.9em;
+  color: var(--muted);
+  font-style: italic;
+}
+#reflow-article p.keywords::before {
+  content: '关键词　';
+  font-style: normal;
+  font-weight: 600;
+  color: var(--accent);
+}
+#reflow-article p.meta {
+  text-align: center;
+  text-indent: 0;
+  color: var(--muted);
+  font-size: 0.78em;
+  opacity: 0.75;
+  margin: 0.3em 0;
+}
+
 /* 公式块：数学字体独立排版（引擎按嵌入数学字体识别） */
 #reflow-article .formula {
   font-family: var(--font-math);

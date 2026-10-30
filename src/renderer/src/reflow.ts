@@ -25,6 +25,8 @@ export interface ReflowBlock {
   rect?: { x0: number; x1: number; y0: number; y1: number }
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
+  /** 首页元数据角色（对齐原版的结构化首页） */
+  role?: 'title' | 'authors' | 'abstract' | 'keywords' | 'meta'
 }
 
 interface RawTextItem {
@@ -107,10 +109,15 @@ function median(nums: number[]): number {
   return s[Math.floor(s.length / 2)]
 }
 
-/** 同一基线组内拼接。plain 用于 text（测试/翻译），html 额外把上下标包成 <sub>/<sup> */
+/** 同一基线组内拼接。plain 用于 text（测试/翻译），html 额外把上下标包成 <sub>/<sup>、首字下沉包 <span class="dc"> */
 function joinFrags(frags: Frag[]): { text: string; html: string } {
   const sorted = [...frags].sort((a, b) => a.x - b.x)
-  const mainSize = median(sorted.map((f) => f.fontSize)) || 10
+  // 主字号：按字符数加权（抗 drop cap 离群——29.6pt 的 "B" 只占 1 字符）
+  const totalChars = sorted.reduce((n, f) => n + Math.max(1, f.text.length), 0)
+  const weighted =
+    sorted.reduce((n, f) => n + f.fontSize * Math.max(1, f.text.length), 0) / Math.max(1, totalChars)
+  const mainSize = weighted > 0 ? weighted : 10
+  const isDropCap = (f: Frag): boolean => f.fontSize > mainSize * 2 && f.text.trim().length <= 2
   // 主基线：按宽度加权取 y（正文行 y 占大头，上下标偏移不干扰）
   const yWeight = new Map<number, number>()
   for (const f of sorted) yWeight.set(f.y, (yWeight.get(f.y) ?? 0) + f.w)
@@ -134,7 +141,13 @@ function joinFrags(frags: Frag[]): { text: string; html: string } {
     const space = needSpace ? ' ' : ''
     text += space + f.text
 
-    const isSmall = f.fontSize < mainSize * 0.8
+    if (isDropCap(f)) {
+      closeTag()
+      html += `${space}<span class="dc">${escapeHtmlStr(f.text)}</span>`
+      prevEnd = f.x + f.w
+      continue
+    }
+    const isSmall = f.fontSize < mainSize * 0.8 && f.fontSize > mainSize * 0.3
     const role: 'sub' | 'sup' | null = isSmall
       ? f.y < mainY - mainSize * 0.12
         ? 'sub'
@@ -219,7 +232,11 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
       if (!text) continue
       // 丢弃纯符号碎片行（孤立上下标/连接符，如 ′′−），无任何字母数字且极短
       if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(text) && text.replace(/\s/g, '').length <= 6) continue
-      const fontSize = median(sg.map((f) => f.fontSize))
+      // 行字号按字符数加权（抗 drop cap：29.6pt 的单字符不应抬高整行字号）
+      const wChars = sg.reduce((n, f) => n + Math.max(1, f.text.length), 0)
+      const fontSize =
+        sg.reduce((n, f) => n + f.fontSize * Math.max(1, f.text.length), 0) / Math.max(1, wChars) ||
+        median(sg.map((f) => f.fontSize))
       const totalW = sg.reduce((n, f) => n + f.w, 0)
       const mathW = sg.reduce((n, f) => n + (f.isMath ? f.w : 0), 0)
       const chars = text.replace(/\s/g, '')
@@ -251,7 +268,7 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
  *    从正文流剔除、独立排在该页末尾。
  * 2) 剩余行做双栏判定：跨中线整行占比低且左右两侧都有足量行 → 左栏后右栏。
  */
-function orderLines(lines: Line[], pageWidth: number): Line[] {
+export function orderLines(lines: Line[], pageWidth: number): Line[] {
   const topDown = (a: Line, b: Line) => a.yTop - b.yTop || a.x0 - b.x0
   const body = [...lines].sort(topDown)
   if (body.length < 6) return body
@@ -279,19 +296,23 @@ function orderLines(lines: Line[], pageWidth: number): Line[] {
 
   const mid = pageWidth / 2
   const gutter = pageWidth * 0.02
-  const spanning = mainSorted.filter((l) => l.x0 < mid - gutter && l.x1 > mid + gutter)
+  const isSpanning = (l: Line): boolean => l.x0 < mid - gutter && l.x1 > mid + gutter
+  const spanning = mainSorted.filter(isSpanning)
   if (spanning.length >= mainSorted.length * 0.25) {
     return [...mainSorted, ...sidebar.sort(topDown)] // 大量整行 → 单栏
   }
 
-  const left = mainSorted.filter((l) => l.x1 <= mid + gutter)
-  const right = mainSorted.filter((l) => l.x0 >= mid - gutter && l.x1 > mid + gutter)
-  if (
-    left.length >= 3 &&
-    right.length >= 3 &&
-    left.length + right.length >= mainSorted.length * 0.8
-  ) {
-    return [...left.sort(topDown), ...right.sort(topDown), ...sidebar.sort(topDown)]
+  // 跨栏行（标题/作者/通栏图表）不能进 left/right——此前它们会被双栏判定直接丢弃
+  const rest = mainSorted.filter((l) => !isSpanning(l))
+  const left = rest.filter((l) => l.x1 <= mid + gutter)
+  const right = rest.filter((l) => l.x0 >= mid - gutter && l.x1 > mid + gutter)
+  if (left.length >= 3 && right.length >= 3 && left.length + right.length >= rest.length * 0.8) {
+    return [
+      ...spanning.sort(topDown),
+      ...left.sort(topDown),
+      ...right.sort(topDown),
+      ...sidebar.sort(topDown)
+    ]
   }
   return [...mainSorted, ...sidebar.sort(topDown)]
 }
@@ -648,6 +669,59 @@ export function debugLinesForPage(page: {
   })
 }
 
+/** 首页元数据结构化：识别标题/作者区/摘要/关键词并打角色标签 */
+function structureFirstPage(blocks: ReflowBlock[]): void {
+  const absIdx = blocks.findIndex((b) => b.page === 1 && /^abstract\s*[—–-]/i.test(b.text.trim()))
+  if (absIdx === -1) return
+  blocks[absIdx].role = 'abstract'
+  for (let i = absIdx + 1; i < Math.min(absIdx + 4, blocks.length); i++) {
+    if (/^index terms\s*[—–-]/i.test(blocks[i].text.trim())) {
+      blocks[i].role = 'keywords'
+      break
+    }
+  }
+  // 标题：摘要之前的开头连续 heading 块，合并为一个 role=title 的 h1
+  let titleStart = -1
+  let titleEnd = -1
+  for (let i = 0; i < absIdx; i++) {
+    if (blocks[i].kind === 'heading' && blocks[i].page === 1) {
+      if (titleStart === -1) titleStart = i
+      titleEnd = i
+    } else if (titleStart !== -1) {
+      break
+    }
+  }
+  if (titleStart !== -1) {
+    const texts: string[] = []
+    const htmls: string[] = []
+    for (let i = titleStart; i <= titleEnd; i++) {
+      texts.push(blocks[i].text)
+      htmls.push(blocks[i].html ?? blocks[i].text)
+    }
+    blocks.splice(
+      titleStart,
+      titleEnd - titleStart + 1,
+      {
+        kind: 'heading',
+        level: 1,
+        page: 1,
+        role: 'title',
+        text: texts.join(' ').replace(/\s+/g, ' '),
+        html: htmls.join(' ')
+      }
+    )
+  }
+  // 标题与摘要之间的正文段 → 作者/机构信息；版权碎块降级为 meta 弱化
+  const newAbsIdx = blocks.findIndex((b) => b.role === 'abstract')
+  for (let i = 0; i < newAbsIdx; i++) {
+    if (blocks[i].page === 1 && blocks[i].kind === 'paragraph' && !blocks[i].role) {
+      blocks[i].role = /©|all rights reserved|licensed use|doi|http/i.test(blocks[i].text)
+        ? 'meta'
+        : 'authors'
+    }
+  }
+}
+
 /** 主入口：整本 PDF → 重排语义块序列 */
 export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
@@ -690,5 +764,7 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   perPage.forEach((p, i) => {
     ordered.push(...orderLines(kept[i], p.width))
   })
-  return linesToBlocks(ordered, bodySize)
+  const blocks = linesToBlocks(ordered, bodySize)
+  structureFirstPage(blocks)
+  return blocks
 }
