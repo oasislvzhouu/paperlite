@@ -172,16 +172,20 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
   const groups: Frag[][] = []
   let cur: Frag[] = []
   let curY = Number.NaN
+  let groupMax = 0
   for (const f of sorted) {
-    // 容差略放宽：把上下标（偏移约 0.4×字号）并入主行，公式才完整
-    const tol = Math.max(2, 0.45 * f.fontSize)
+    // 容差按「当前组最大字号与自身字号的较大者」：7pt 下标离 10pt 主基线可偏 4pt+，
+    // 若按自身字号算容差会把下标甩出行（如 W_t 的 t）
+    const tol = Math.max(2, 0.45 * Math.max(f.fontSize, groupMax))
     if (cur.length === 0 || Math.abs(f.y - curY) <= tol) {
       cur.push(f)
       if (cur.length === 1) curY = f.y
+      groupMax = Math.max(groupMax, f.fontSize)
     } else {
       groups.push(cur)
       cur = [f]
       curY = f.y
+      groupMax = f.fontSize
     }
   }
   if (cur.length) groups.push(cur)
@@ -377,6 +381,20 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
 
+    // 孤儿上下标碎片：整行都是小字号（公式的下标散件，如 7pt 的 "t"/"u trn"）且极短
+    // → 直接并入前一块（公式块的 rect 也会随之包含它），不独立成段
+    const tinyDebris =
+      l.fontSize > 0 &&
+      l.fontSize < bodySize * 0.8 &&
+      l.text.replace(/\s/g, '').length <= 12 &&
+      !l.eqNumbered
+    if (tinyDebris && bufT.length > 0 && bufKind !== 'heading') {
+      bufT.push(l.text)
+      bufH.push(l.html)
+      bufLines.push(l)
+      continue
+    }
+
     if (l.image) {
       // 连续图片行（同一张图被拆成多张）合并进一个图片块
       if (bufImages.length === 0) flush()
@@ -569,6 +587,34 @@ async function cropPageImages(
     })
   }
   return lines
+}
+
+/** 调试导出：单页行重建结果（诊断排版问题用） */
+export function debugLinesForPage(page: {
+  getTextContent: () => Promise<{ items: unknown[]; styles?: unknown }>
+  getViewport: (o: { scale: number }) => { width: number; height: number }
+}): Promise<Line[]> {
+  return page.getTextContent().then((tc) => {
+    const styles = (tc.styles ?? {}) as unknown as FontStyles
+    const frags: Frag[] = []
+    for (const raw of tc.items as unknown[]) {
+      const it = raw as RawTextItem
+      if (typeof it.str !== 'string' || !it.str.trim() || !it.transform) continue
+      const t = it.transform
+      const fontSize = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || it.height || 10
+      const fam = it.fontName ? styles[it.fontName]?.fontFamily : undefined
+      frags.push({
+        x: t[4],
+        y: t[5],
+        w: it.width || 0,
+        fontSize,
+        text: it.str,
+        isMath: isMathFontFamily(fam) || looksLikeMathText(it.str)
+      })
+    }
+    const vp = page.getViewport({ scale: 1 })
+    return fragsToLines(frags, vp.height, 0)
+  })
 }
 
 /** 主入口：整本 PDF → 重排语义块序列 */
