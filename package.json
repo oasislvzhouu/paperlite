@@ -6,6 +6,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
+    "start": "electron .",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "smoke": "electron-vite build && electron . --smoke",
