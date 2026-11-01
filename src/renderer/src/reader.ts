@@ -238,7 +238,7 @@ function renderReflow(): void {
 }
 
 /** 渐进图片挂载：文本渲染后逐页补图（单页 4s 护栏，失败不影响阅读） */
-function insertFigure(pageNo: number, yTop: number, dataUrl: string): void {
+function insertFigure(pageNo: number, yTop: number, dataUrl: string, naturalRatio = 1): void {
   const article = $('#reflow-article')
   if (!blocks) return
   const key = `${pageNo}-${Math.round(yTop)}`
@@ -248,6 +248,9 @@ function insertFigure(pageNo: number, yTop: number, dataUrl: string): void {
   fig.dataset['key'] = key
   const img = document.createElement('img')
   img.src = dataUrl
+  // 按自然尺寸占比展示：小图不拉满（下限 42% 保可读，上限 100%）
+  const pct = Math.round(Math.min(100, Math.max(42, naturalRatio * 115)))
+  img.style.maxWidth = pct + '%'
   fig.appendChild(img)
   // 插到同页第一个 top >= 图片顶的块之前；没有则放页尾（下一页分隔符前）
   const anchor = blocks
@@ -329,13 +332,14 @@ async function attachImages(): Promise<void> {
       const vp = page.getViewport({ scale: 1 })
       const imgs = await Promise.race([
         cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS),
-        new Promise<Array<{ yTop: number; image?: string }>>((resolve) =>
+        new Promise<Array<{ yTop: number; x0: number; x1: number; image?: string }>>((resolve) =>
           setTimeout(() => resolve([]), 15000)
         )
       ])
       for (const im of imgs) {
         if (im.image) {
-          insertFigure(p, im.yTop, im.image)
+          const ratio = vp.width > 0 ? (im.x1 - im.x0) / vp.width : 1
+          insertFigure(p, im.yTop, im.image, ratio)
           inserted++
         }
       }

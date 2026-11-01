@@ -354,6 +354,10 @@ function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): Line[][
 /** 行是公式吗：字体占比 / 符号密度 / 公式编号 / 逐符号碎片结构，任一强信号即判定 */
 function isFormulaLine(l: Line): boolean {
   if (l.text.replace(/\s/g, '').length < 1) return false
+  // 算法伪代码的输入/变量声明（如 "Budget, θ, θ−, ER memory"）：
+  // 含 2 个以上长英文单词 → 是名词列表不是公式
+  const longWords = l.text.match(/[A-Za-z]{4,}/g) ?? []
+  if (longWords.length >= 2) return false
   if (l.mathRatio >= 0.5) return true
   if (l.charMathRatio >= 0.25) return true
   if (l.eqNumbered && l.charMathRatio >= 0.02) return true
