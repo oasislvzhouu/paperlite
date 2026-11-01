@@ -4,6 +4,7 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { extractReflowBlocks, cropPageImages, type ReflowBlock } from './reflow'
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
+import { recreatePdfWorker } from './worker-mgr'
 
 type Mode = 'reflow' | 'original'
 
@@ -116,13 +117,24 @@ export async function openReader(id: number): Promise<void> {
   const info = await window.paperlite.openReading(id)
   if (!info) return
   await task?.destroy()
-  task = pdfjsLib.getDocument({
-    url: window.paperlite.pdfUrl(id),
-    cMapUrl: 'assets/cmaps/',
-    cMapPacked: true,
-    standardFontDataUrl: 'assets/standard_fonts/'
-  })
-  doc = await task.promise
+  const load = (): void => {
+    task = pdfjsLib.getDocument({
+      url: window.paperlite.pdfUrl(id),
+      cMapUrl: 'assets/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: 'assets/standard_fonts/',
+      isOffscreenCanvasSupported: false
+    })
+  }
+  load()
+  doc = await task!.promise
+  // 会话级 worker 随机坏死检测：渲染探测失败 → 重建 worker 重载文档（最多 2 轮）
+  for (let attempt = 0; attempt < 2 && !(await quickRenderProbe()); attempt++) {
+    await task!.destroy()
+    recreatePdfWorker()
+    load()
+    doc = await task!.promise
+  }
   readingId = id
   pageNum = clamp(info.lastPage || 1, 1, doc.numPages)
   zoom = 1
@@ -158,15 +170,13 @@ export async function openReader(id: number): Promise<void> {
     goTo(pageNum)
     void loadHighlights(id).then(() => applyHighlights())
     void hydrateTranslations()
-    // worker 在密集文本提取后有一段"泄洪期"（其间 render 会超时），
-    // 图片挂载延迟启动避开，公式识别随后
+    // render 恢复窗口：图片与公式管线各自独立探测恢复（平台级泄洪期可达分钟级）
     window.setTimeout(() => {
-      if (readingId === id && mode === 'reflow') {
-        void attachImages().then(() => {
-          if (readingId === id) void upgradeFormulas()
-        })
-      }
+      if (readingId === id && mode === 'reflow') void attachImages()
     }, 8000)
+    window.setTimeout(() => {
+      if (readingId === id && mode === 'reflow') void upgradeFormulas()
+    }, 12000)
   } else {
     applyWidth()
     void render()
@@ -253,8 +263,65 @@ function insertFigure(pageNo: number, yTop: number, dataUrl: string): void {
   }
 }
 
+/** 单次快速渲染探测（3s），用于判断本 worker 是否具备渲染能力 */
+async function quickRenderProbe(): Promise<boolean> {
+  if (!doc) return false
+  try {
+    const page = await doc.getPage(1)
+    const vp = page.getViewport({ scale: 0.25 })
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, Math.floor(vp.width))
+    c.height = Math.max(1, Math.floor(vp.height))
+    const cx = c.getContext('2d')
+    if (!cx) return false
+    await Promise.race([
+      page.render({ canvasContext: cx, viewport: vp }).promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('probe-timeout')), 3000))
+    ])
+    return true
+  } catch {
+    const g = globalThis as { __plProbe?: number[] }
+    g.__plProbe = [...(g.__plProbe ?? []), Math.round(performance.now())]
+    return false
+  }
+}
+
+/** 泄洪/毒化规避探测：低分辨率试渲染，3s 内响应即就绪。
+ *  注意：绝不调用 renderTask.cancel()——cancel 会毒化 pdf.js v4 的 intentState，
+ *  使该页（乃至后续）所有 render 永久挂起；超时直接丢弃任务引用即可 */
+async function probeRenderReady(): Promise<boolean> {
+  if (!doc) return false
+  try {
+    const page = await doc.getPage(1)
+    for (let i = 0; i < 24; i++) {
+      try {
+        const vp = page.getViewport({ scale: 0.25 })
+        const c = document.createElement('canvas')
+        c.width = Math.max(1, Math.floor(vp.width))
+        c.height = Math.max(1, Math.floor(vp.height))
+        const cx = c.getContext('2d')
+        if (!cx) return false
+        await Promise.race([
+          page.render({ canvasContext: cx, viewport: vp }).promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('probe-timeout')), 3000))
+        ])
+        return true
+      } catch {
+        const g = globalThis as { __plProbe?: number[] }
+        g.__plProbe = [...(g.__plProbe ?? []), Math.round(performance.now())]
+        await new Promise((r) => setTimeout(r, 5000))
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
 async function attachImages(): Promise<void> {
   if (!doc || mode !== 'reflow') return
+  if (!(await probeRenderReady())) return
+  let inserted = 0
   for (let p = 1; p <= doc.numPages; p++) {
     if (readingId === 0) return
     try {
@@ -267,10 +334,27 @@ async function attachImages(): Promise<void> {
         )
       ])
       for (const im of imgs) {
-        if (im.image) insertFigure(p, im.yTop, im.image)
+        if (im.image) {
+          insertFigure(p, im.yTop, im.image)
+          inserted++
+        }
       }
     } catch {
       /* 单页失败跳过 */
+    }
+  }
+  // 提示用户图表已就位（复用右下角浮标）
+  if (inserted > 0) {
+    const chip = document.querySelector('#trans-status') as HTMLElement | null
+    const text = document.querySelector('#trans-status-text') as HTMLElement | null
+    if (chip && text) {
+      text.textContent = `图表加载完成 ✓ ${inserted} 张`
+      chip.classList.remove('done')
+      chip.hidden = false
+      window.setTimeout(() => {
+        chip.classList.add('done')
+        window.setTimeout(() => (chip.hidden = true), 450)
+      }, 2000)
     }
   }
 }
@@ -321,6 +405,7 @@ async function cropFormula(pageNo: number, rect: FRect): Promise<string | null> 
 /** 相邻公式块（同页、垂直间距 < 20pt）合并为一个识别区域，避免孤儿上下标碎片被单独识别 */
 async function upgradeFormulas(): Promise<void> {
   if (!blocks || !doc) return
+  await probeRenderReady()
   try {
     const status = await window.paperlite.llmStatus()
     if (!status.hasKey) return

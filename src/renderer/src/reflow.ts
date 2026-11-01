@@ -597,21 +597,29 @@ export async function cropPageImages(
   canvas.height = Math.floor(viewport.height)
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
-  const renderTask = page.render({ canvasContext: ctx, viewport })
-  try {
-    await Promise.race([
-      renderTask.promise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('render-timeout')), 3500))
-    ])
-  } catch (err) {
+  // 单次渲染带超时（不 cancel——cancel 会毒化 v4 intentState 导致后续 render 永久挂起；
+  // 超时则丢弃任务引用，换新 canvas 重试）
+  const tryRender = async (timeoutMs: number): Promise<boolean> => {
     try {
-      renderTask.cancel()
+      await Promise.race([
+        page.render({ canvasContext: ctx, viewport }).promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('render-timeout')), timeoutMs))
+      ])
+      return true
     } catch {
-      /* ignore */
+      return false
     }
-    const g4 = globalThis as { __plImgRenderErr?: Record<number, string> }
-    g4.__plImgRenderErr = { ...(g4.__plImgRenderErr ?? {}), [page.pageNumber]: String(err) }
-    return []
+  }
+  if (!(await tryRender(4000))) {
+    await new Promise((r) => setTimeout(r, 5000))
+    if (!(await tryRender(8000))) {
+      const g4 = globalThis as { __plImgRenderErr?: Record<number, string> }
+      g4.__plImgRenderErr = {
+        ...(g4.__plImgRenderErr ?? {}),
+        [page.pageNumber]: 'render-timeout (retried, no-cancel)'
+      }
+      return []
+    }
   }
 
   const g = globalThis as { __plImgRects?: Record<number, number>; __plImgErr?: Record<number, string> }

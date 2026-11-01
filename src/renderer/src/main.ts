@@ -1,18 +1,11 @@
 import * as pdfjsLib from 'pdfjs-dist'
-import PdfjsWorker from './pdf-worker?worker&inline'
+import './worker-mgr'
 import './style.css'
 import { initReaderEvents, openReader } from './reader'
 import { extractReflowBlocks } from './reflow'
 import type { ReadingMeta } from '../../shared/types'
 
-// 内联 worker（自带 toHex polyfill），不再依赖外部 workerSrc 资源路径
-const pdfWorker = new PdfjsWorker()
-pdfWorker.onerror = (e) => {
-  const g = globalThis as { __plWorkerErr?: string[] }
-  g.__plWorkerErr = [...(g.__plWorkerErr ?? []), String(e.message ?? e)]
-  console.error('[paperlite] pdf worker 启动失败:', e.message ?? e)
-}
-pdfjsLib.GlobalWorkerOptions.workerPort = pdfWorker
+// worker 生命周期统一由 worker-mgr.ts 管理
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
 
@@ -102,7 +95,8 @@ async function generateThumb(id: number): Promise<void> {
       url: window.paperlite.pdfUrl(id),
       cMapUrl: 'assets/cmaps/',
       cMapPacked: true,
-      standardFontDataUrl: 'assets/standard_fonts/'
+      standardFontDataUrl: 'assets/standard_fonts/',
+      isOffscreenCanvasSupported: false
     })
     const d = await task.promise
     const page = await d.getPage(1)
@@ -136,7 +130,8 @@ async function prefetchTranslations(meta: ReadingMeta): Promise<void> {
       url: window.paperlite.pdfUrl(meta.id),
       cMapUrl: 'assets/cmaps/',
       cMapPacked: true,
-      standardFontDataUrl: 'assets/standard_fonts/'
+      standardFontDataUrl: 'assets/standard_fonts/',
+      isOffscreenCanvasSupported: false
     })
     const d = await task.promise
     const blks = await extractReflowBlocks(d)
