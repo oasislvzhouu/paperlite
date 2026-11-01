@@ -1,4 +1,5 @@
-import { app, BrowserWindow, net, protocol } from 'electron'
+import { app, BrowserWindow, dialog, Menu, net, protocol } from 'electron'
+import type { MenuItemConstructorOptions } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { initDb, resolveReadingById, thumbPath } from './db'
@@ -13,6 +14,71 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 let mainWindow: BrowserWindow | null = null
+
+/** 中文应用菜单（替换 Electron 默认英文菜单） */
+function registerMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '新建窗口', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
+        { type: 'separator' },
+        { role: 'quit', label: '退出' }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'reload', label: '刷新' },
+        { role: 'forceReload', label: '强制刷新' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '实际大小' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' }
+      ]
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize', label: '最小化' },
+        { role: 'close', label: '关闭' }
+      ]
+    },
+    {
+      label: '帮助',
+      submenu: [
+        {
+          label: '关于 PaperLite',
+          click: () => {
+            void dialog.showMessageBox({
+              type: 'info',
+              title: '关于',
+              message: 'PaperLite v0.1.0',
+              detail: '轻量文献阅读器：重排阅读 · 公式 LaTeX · AI 双语翻译',
+              buttons: ['确定']
+            })
+          }
+        }
+      ]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -72,6 +138,7 @@ app.whenReady().then(() => {
   initDb()
   registerPaperliteProtocol()
   registerIpc()
+  registerMenu()
   createWindow()
 
   // 冒烟模式：启动 2 秒后自退，用于验证原生模块加载与窗口创建（CI/自动化）
