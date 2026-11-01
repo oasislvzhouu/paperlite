@@ -26,7 +26,7 @@ export interface ReflowBlock {
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
   /** 元数据角色：首页结构化 + 全文图注 */
-  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta' | 'caption'
+  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta' | 'caption' | 'list-item' | 'para-cont'
 }
 
 interface RawTextItem {
@@ -372,8 +372,39 @@ function isSectionHeadingLine(l: Line): boolean {
   return /^[A-Z]/.test(l.text.trim())
 }
 
+/** 全文行间隙统计：返回最常见行间隙（近似排版行距） */
+function estimateLeading(lines: Line[], bodySize: number): number {
+  const buckets = new Map<number, number>()
+  for (let i = 1; i < lines.length; i++) {
+    const prev = lines[i - 1]
+    const l = lines[i]
+    if (!prev.fontSize || !l.fontSize) continue
+    if (prev.page !== l.page) continue
+    // 仅统计同栏（x0 接近）的连续行，排除跨栏跳变
+    if (Math.abs(l.x0 - prev.x0) > bodySize * 1.2) continue
+    const gap = l.yTop - prev.yTop - prev.fontSize
+    if (gap <= 0 || gap > bodySize * 2) continue
+    const key = Math.round(gap / (bodySize * 0.08))
+    buckets.set(key, (buckets.get(key) ?? 0) + 1)
+  }
+  let bestKey = -1
+  let bestCount = 0
+  for (const [k, c] of buckets) {
+    if (c > bestCount) {
+      bestCount = c
+      bestKey = k
+    }
+  }
+  if (bestKey < 0) return bodySize * 0.2 // 兜底：常见默认行距
+  return bestKey * bodySize * 0.08 + bodySize * 0.04
+}
+
+const LIST_ITEM_RE = /^\(?([0-9]{1,2}|[a-zA-Z])[).]\s+\S/
+
 /** 行流 → 语义块（标题/段落/公式/图片） */
 function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
+  // 自适应段距阈值：实际行距（众数）+ 30% 余量；下限 0.35×字号防过敏
+  const paraGap = Math.max(bodySize * 0.35, estimateLeading(lines, bodySize) + bodySize * 0.3)
   const blocks: ReflowBlock[] = []
   const isHeadingSize = (s: number) => s > bodySize * 1.18 && s >= 11.5
 
@@ -411,6 +442,7 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         }
       }
       if (bufLines[0]) block.top = bufLines[0].yTop
+      if (block.kind === 'paragraph' && LIST_ITEM_RE.test(text.trim()) && text.length < 160 && !/^([IVXLC]{1,5})\./.test(text.trim())) block.role = 'list-item'
       blocks.push(block)
     }
     bufT = []
@@ -466,11 +498,14 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    let brk = bufT.length === 0 || kind !== bufKind
+    // 列表项：每项独立成块
+    const isListItem = kind === 'paragraph' && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
+
+    let brk = bufT.length === 0 || kind !== bufKind || isListItem
     if (!brk && lines[i - 1]) {
       const prev = lines[i - 1]
       const vGap = l.yTop - prev.yTop - prev.fontSize
-      if (vGap > bodySize * 0.55) brk = true // 段间距
+      if (vGap > paraGap) brk = true // 段间距（自适应阈值）
       // 首行缩进（1~4.5em 内的右移）；更大的 x0 跳变是换栏，不构成分段
       const dx = l.x0 - prev.x0
       if (dx > bodySize * 1.6 && dx < bodySize * 4.5) brk = true
@@ -805,8 +840,29 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   })
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
+  markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
+}
+
+/** 公式后的续接句（"where W denotes…"）不打段前空隙，视觉上延续前段 */
+const CONT_SENT_RE = /^(where|here|and|but|so|thus|then|such|in which|其中|式中|其中，)|[a-z]/i
+function markFormulaContinuation(blocks: ReflowBlock[]): void {
+  for (let i = 2; i < blocks.length; i++) {
+    const a = blocks[i - 2]
+    const f = blocks[i - 1]
+    const b = blocks[i]
+    if (
+      a.kind === 'paragraph' &&
+      f.kind === 'formula' &&
+      b.kind === 'paragraph' &&
+      !b.role &&
+      CONT_SENT_RE.test(b.text.trim()) &&
+      b.page === a.page
+    ) {
+      b.role = 'para-cont'
+    }
+  }
 }
 
 /** 图题/表题识别（"Fig. 1. xxx"、"图2 xxx"、"TABLE II"）→ caption 角色 */

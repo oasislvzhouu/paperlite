@@ -619,3 +619,8 @@ body.reflow-mode .zoomer { display: none; }
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* 公式后的续接句：延续前段，无段前空隙 */
+#reflow-article p.para-cont { margin-top: -0.6em; }
+/* 列表项：悬挂缩进 */
+#reflow-article p.list-item { margin: 0.35em 0 0.35em 2em; text-indent: -1.2em; }
