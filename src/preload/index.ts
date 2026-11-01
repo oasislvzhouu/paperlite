@@ -39,6 +39,12 @@ const api = {
     ipcRenderer.invoke('highlights:update', id, color, note),
   removeHighlight: (id: number): Promise<boolean> =>
     ipcRenderer.invoke('highlights:remove', id),
+  /** 订阅翻译进度（导入预翻译 + 手动翻译），返回取消订阅函数 */
+  onTranslationProgress: (cb: (p: { done: number; total: number; kind: string }) => void): (() => void) => {
+    const listener = (_e: unknown, p: { done: number; total: number; kind: string }): void => cb(p)
+    ipcRenderer.on('translation:progress', listener as never)
+    return () => ipcRenderer.removeListener('translation:progress', listener as never)
+  },
   pdfUrl: (id: number): string => `paperlite://pdf/${id}`,
   thumbUrl: (id: number): string => `paperlite://thumb/${id}`
 }

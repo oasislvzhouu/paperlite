@@ -127,10 +127,16 @@ export function registerIpc(): void {
 
   ipcMain.handle('llm:status', () => llmStatus())
 
-  ipcMain.handle('translate:paragraphs', async (_e, texts: string[]): Promise<string[]> => {
+  ipcMain.handle('translate:paragraphs', async (evt, texts: string[]): Promise<string[]> => {
     if (!Array.isArray(texts) || texts.length === 0) return []
     console.log(`[paperlite-main] 翻译请求：${texts.length} 段`)
-    return translateParagraphs(texts)
+    return translateParagraphs(texts, (done, total) => {
+      try {
+        evt.sender.send('translation:progress', { done, total, kind: 'interactive' })
+      } catch {
+        /* 窗口可能已关闭 */
+      }
+    })
   })
 
   ipcMain.handle('formula:recognize', async (_e, dataUrl: string): Promise<string> => {
@@ -219,7 +225,7 @@ export function registerIpc(): void {
   /** 导入后预翻译：跳过已缓存的，其余后台跑（不阻塞调用方），完成即入库 */
   ipcMain.handle(
     'translations:prefetch',
-    async (_e, texts: string[]): Promise<{ cached: number; queued: number }> => {
+    async (evt, texts: string[]): Promise<{ cached: number; queued: number }> => {
       const stmt = getDb().prepare('SELECT 1 FROM translations WHERE src_sha = ?')
       const todo: string[] = []
       let cached = 0
@@ -230,9 +236,16 @@ export function registerIpc(): void {
       }
       if (todo.length > 0) {
         console.log(`[paperlite-main] 预翻译：${todo.length} 段（命中缓存 ${cached}）`)
+        const sender = evt.sender
         void (async () => {
           try {
-            const results = await translateParagraphs(todo)
+            const results = await translateParagraphs(todo, (done, total) => {
+              try {
+                sender.send('translation:progress', { done, total, kind: 'prefetch' })
+              } catch {
+                /* 窗口可能已关闭 */
+              }
+            })
             const items = todo
               .map((text, i) => ({ text, trans: results[i] ?? '' }))
               .filter((x) => x.trans)

@@ -169,6 +169,27 @@ async function importFlow(): Promise<void> {
 }
 
 function init(): void {
+  // 全局翻译进度浮标（导入预翻译 + 手动翻译）
+  const chip = () => document.querySelector('#trans-status') as HTMLElement
+  const chipText = () => document.querySelector('#trans-status-text') as HTMLElement
+  let chipTimer: number | undefined
+  window.paperlite.onTranslationProgress(({ done, total, kind }) => {
+    if (total <= 0) return
+    const label = kind === 'prefetch' ? '后台预翻译' : 'AI 翻译'
+    const c = chip()
+    c.classList.remove('done')
+    c.hidden = false
+    if (done >= total) {
+      chipText().textContent = `${label}完成 ✓ ${total} 段`
+      clearTimeout(chipTimer)
+      chipTimer = window.setTimeout(() => {
+        c.classList.add('done')
+        window.setTimeout(() => (c.hidden = true), 450)
+      }, 1800)
+    } else {
+      chipText().textContent = `${label} ${done}/${total} 段`
+    }
+  })
   $('#import-btn').addEventListener('click', () => void importFlow())
   $('#search').addEventListener('input', renderShelf)
   initReaderEvents(() => void refreshShelf())

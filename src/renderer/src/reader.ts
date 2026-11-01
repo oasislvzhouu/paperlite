@@ -451,6 +451,9 @@ async function translateFlow(): Promise<void> {
 
   btn.disabled = true
   btn.textContent = '翻译中…'
+  const unsub = window.paperlite.onTranslationProgress(({ done, total, kind }) => {
+    if (kind === 'interactive') btn.textContent = `翻译中 ${done}/${total}`
+  })
   try {
     const result = await window.paperlite.translateParagraphs(missing)
     const items = missing
@@ -469,6 +472,7 @@ async function translateFlow(): Promise<void> {
     alert('翻译失败：' + String(err))
     btn.textContent = '译'
   } finally {
+    unsub()
     btn.disabled = false
   }
 }

@@ -96,7 +96,10 @@ export async function recognizeFormula(dataUrl: string): Promise<string> {
     .replace(/^\\\[|\\\]$/g, '')
     .trim()
 }
-export async function translateParagraphs(texts: string[]): Promise<string[]> {
+export async function translateParagraphs(
+  texts: string[],
+  onProgress?: (done: number, total: number) => void
+): Promise<string[]> {
   const out: string[] = new Array(texts.length).fill('')
   const BATCH = 6
   const jobs: Array<{ start: number; batch: string[] }> = []
@@ -105,6 +108,10 @@ export async function translateParagraphs(texts: string[]): Promise<string[]> {
   }
   const CONCURRENCY = 4
   let cursor = 0
+  let completed = 0
+  const report = (): void => {
+    if (onProgress) onProgress(completed, texts.length)
+  }
   async function worker(): Promise<void> {
     while (cursor < jobs.length) {
       const job = jobs[cursor++]
@@ -124,6 +131,9 @@ export async function translateParagraphs(texts: string[]): Promise<string[]> {
         }
       } catch (err) {
         console.log(`[paperlite-main] 翻译批次 @${job.start} 失败:`, err)
+      } finally {
+        completed += job.batch.length
+        report()
       }
     }
   }
