@@ -28,17 +28,21 @@
           <button id="back-btn" title="返回书架">← 书架</button>
           <button id="toc-btn" title="目录">☰ 目录</button>
           <div id="reader-title" class="ellipsis"></div>
+          <span class="tb-sep"></span>
           <div class="modes">
             <button id="reflow-btn" class="toggle-on" title="排版模式（重排为流式文本）">排版</button>
             <button id="original-btn" title="原版模式（还原本来的版面）">原版</button>
           </div>
+          <span class="tb-sep"></span>
           <div class="pager">
             <button id="prev-btn" title="上一页">‹ 上页</button>
             <span class="page-box">第 <input id="page-input" type="number" min="1" /> / <span id="page-total">?</span> 页</span>
             <button id="next-btn" title="下一页">下页 ›</button>
           </div>
+          <span class="tb-sep"></span>
           <div class="fonter reflow-only">
             <button id="translate-btn" title="AI 翻译（GLM，双语对照）">译</button>
+            <button id="search-btn" title="文内搜索">搜</button>
             <button id="width-btn" title="切换版面宽度">宽</button>
             <button id="font-dec" title="缩小字号">字−</button>
             <button id="font-inc" title="放大字号">字＋</button>
@@ -53,6 +57,31 @@
           <div class="toc-head">目录</div>
           <div id="toc-list"></div>
         </nav>
+        <div id="search-bar" hidden>
+          <input id="search-input" type="search" placeholder="文内搜索…" autocomplete="off" />
+          <span id="search-count" class="muted">0/0</span>
+          <button id="search-prev" title="上一个">‹</button>
+          <button id="search-next" title="下一个">›</button>
+          <button id="search-close" title="关闭搜索">✕</button>
+        </div>
+        <div id="hl-pop" hidden>
+          <button data-act="hl" title="划线高亮">🖍 高亮</button>
+          <button data-act="note" title="高亮并写笔记">📝 笔记</button>
+          <button data-act="copy" title="复制选中文本">⧉ 复制</button>
+        </div>
+        <div id="note-pop" hidden>
+          <textarea id="note-text" placeholder="写下你的笔记…" rows="3"></textarea>
+          <div class="note-colors">
+            <button class="swatch c-yellow" data-color="yellow" title="黄色"></button>
+            <button class="swatch c-green" data-color="green" title="绿色"></button>
+            <button class="swatch c-blue" data-color="blue" title="蓝色"></button>
+            <button class="swatch c-pink" data-color="pink" title="粉色"></button>
+          </div>
+          <div class="note-actions">
+            <button id="note-delete" class="danger" title="删除此高亮">删除</button>
+            <button id="note-save" class="primary">保存</button>
+          </div>
+        </div>
         <div id="page-wrap"><canvas id="pdf-canvas"></canvas></div>
         <div id="reflow-wrap" hidden>
           <div id="reflow-loading" hidden>正在解析排版…</div>

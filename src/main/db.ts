@@ -40,6 +40,18 @@ export function initDb(): void {
       trans      TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS highlights (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      reading_id   INTEGER NOT NULL,
+      block_index  INTEGER NOT NULL,
+      start_offset INTEGER NOT NULL,
+      end_offset   INTEGER NOT NULL,
+      text         TEXT NOT NULL,
+      color        TEXT NOT NULL DEFAULT 'yellow',
+      note         TEXT NOT NULL DEFAULT '',
+      created_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_highlights_reading ON highlights(reading_id, block_index);
   `)
 }
 

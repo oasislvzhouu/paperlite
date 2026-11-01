@@ -29,6 +29,16 @@ const api = {
     ipcRenderer.invoke('translations:prefetch', texts),
   recognizeFormula: (dataUrl: string): Promise<string> =>
     ipcRenderer.invoke('formula:recognize', dataUrl),
+  listHighlights: (readingId: number): Promise<Array<{
+    id: number; block_index: number; start_offset: number; end_offset: number
+    text: string; color: string; note: string
+  }>> => ipcRenderer.invoke('highlights:list', readingId),
+  addHighlight: (readingId: number, bi: number, start: number, end: number, text: string, color: string, note: string): Promise<number> =>
+    ipcRenderer.invoke('highlights:add', readingId, bi, start, end, text, color, note),
+  updateHighlight: (id: number, color: string | null, note: string | null): Promise<boolean> =>
+    ipcRenderer.invoke('highlights:update', id, color, note),
+  removeHighlight: (id: number): Promise<boolean> =>
+    ipcRenderer.invoke('highlights:remove', id),
   pdfUrl: (id: number): string => `paperlite://pdf/${id}`,
   thumbUrl: (id: number): string => `paperlite://thumb/${id}`
 }

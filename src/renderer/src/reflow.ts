@@ -588,17 +588,8 @@ export async function cropPageImages(
   ops: PdfOpsCodes
 ): Promise<Line[]> {
   if (typeof document === 'undefined') return []
-  const g = globalThis as { __plImgRects?: Record<number, number>; __plImgErr?: Record<number, string> }
-  const opList = await page.getOperatorList().catch((e: unknown) => {
-    g.__plImgErr = { ...(g.__plImgErr ?? {}), [page.pageNumber]: String(e) }
-    return null
-  })
-  if (!opList) return []
-  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops)
-  g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
-  if (rects.length === 0) return []
-
-  // 高分辨率裁剪（3×：高清屏上拉伸到正文宽度依然清晰）
+  // 顺序关键：先 render 再 getOperatorList。反序（oplist→render）会在真 worker 上
+  // 把同页 render 悬死（v4 intent 状态互锁），这是此前图片消失的根因
   const scale = Math.min(3, 2000 / viewportW)
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
@@ -606,8 +597,6 @@ export async function cropPageImages(
   canvas.height = Math.floor(viewport.height)
   const ctx = canvas.getContext('2d')
   if (!ctx) return []
-  // 渲染带取消的超时护栏：个别页 render 在 worker 上可能永不返回，
-  // 必须取消渲染任务释放页面，否则堆积的挂起任务会拖垮后续所有页
   const renderTask = page.render({ canvasContext: ctx, viewport })
   try {
     await Promise.race([
@@ -618,12 +607,22 @@ export async function cropPageImages(
     try {
       renderTask.cancel()
     } catch {
-      /* cancel 可能再抛 RenderingCancelledException，忽略 */
+      /* ignore */
     }
     const g4 = globalThis as { __plImgRenderErr?: Record<number, string> }
     g4.__plImgRenderErr = { ...(g4.__plImgRenderErr ?? {}), [page.pageNumber]: String(err) }
     return []
   }
+
+  const g = globalThis as { __plImgRects?: Record<number, number>; __plImgErr?: Record<number, string> }
+  const opList = await page.getOperatorList().catch((e: unknown) => {
+    g.__plImgErr = { ...(g.__plImgErr ?? {}), [page.pageNumber]: String(e) }
+    return null
+  })
+  if (!opList) return []
+  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops)
+  g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
+  if (rects.length === 0) return []
 
   const lines: Line[] = []
   for (const r of rects) {

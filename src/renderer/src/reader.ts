@@ -3,6 +3,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { extractReflowBlocks, cropPageImages, type ReflowBlock } from './reflow'
+import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
 
 type Mode = 'reflow' | 'original'
 
@@ -155,8 +156,17 @@ export async function openReader(id: number): Promise<void> {
     renderReflow()
     applyWidth()
     goTo(pageNum)
+    void loadHighlights(id).then(() => applyHighlights())
     void hydrateTranslations()
-    void attachImages().then(() => void upgradeFormulas())
+    // worker 在密集文本提取后有一段"泄洪期"（其间 render 会超时），
+    // 图片挂载延迟启动避开，公式识别随后
+    window.setTimeout(() => {
+      if (readingId === id && mode === 'reflow') {
+        void attachImages().then(() => {
+          if (readingId === id) void upgradeFormulas()
+        })
+      }
+    }, 8000)
   } else {
     applyWidth()
     void render()
@@ -525,7 +535,79 @@ function goTo(n: number): void {
   }
 }
 
+/* ── 文内搜索：块级命中 + 跳转 ── */
+
+let searchHits: HTMLElement[] = []
+let searchIdx = 0
+let searchTimer: number | undefined
+
+function clearSearchMarks(): void {
+  document.querySelectorAll('.search-hit,.search-current').forEach((el) => {
+    el.classList.remove('search-hit', 'search-current')
+  })
+}
+
+function doSearch(): void {
+  clearSearchMarks()
+  searchHits = []
+  searchIdx = 0
+  const q = ($('#search-input') as HTMLInputElement).value.trim().toLowerCase()
+  const count = $('#search-count')
+  if (q.length < 1) {
+    count.textContent = '0/0'
+    return
+  }
+  const article = $('#reflow-article')
+  article.querySelectorAll('p[data-bi], h1, h2, h3, h4, .formula').forEach((el) => {
+    const t = (el.textContent ?? '').toLowerCase()
+    if (t.includes(q)) {
+      el.classList.add('search-hit')
+      searchHits.push(el as HTMLElement)
+    }
+  })
+  count.textContent = searchHits.length > 0 ? `1/${searchHits.length}` : '无结果'
+  if (searchHits.length > 0) jumpSearch(0)
+}
+
+function jumpSearch(idx: number): void {
+  if (searchHits.length === 0) return
+  searchIdx = (idx + searchHits.length) % searchHits.length
+  clearSearchMarks()
+  searchHits.forEach((el) => el.classList.add('search-hit'))
+  const cur = searchHits[searchIdx]
+  cur.classList.add('search-current')
+  cur.scrollIntoView({ block: 'center' })
+  ;($('#search-count') as HTMLElement).textContent = `${searchIdx + 1}/${searchHits.length}`
+}
+
+function initSearchEvents(): void {
+  $('#search-btn').addEventListener('click', () => {
+    const bar = $('#search-bar')
+    bar.hidden = !bar.hidden
+    $('#search-btn').classList.toggle('toggle-on', !bar.hidden)
+    if (!bar.hidden) ($('#search-input') as HTMLInputElement).focus()
+    else clearSearchMarks()
+  })
+  $('#search-input').addEventListener('input', () => {
+    clearTimeout(searchTimer)
+    searchTimer = window.setTimeout(doSearch, 300)
+  })
+  $('#search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') jumpSearch(searchIdx + 1)
+    if (e.key === 'Escape') $('#search-close').click()
+  })
+  $('#search-next').addEventListener('click', () => jumpSearch(searchIdx + 1))
+  $('#search-prev').addEventListener('click', () => jumpSearch(searchIdx - 1))
+  $('#search-close').addEventListener('click', () => {
+    $('#search-bar').hidden = true
+    $('#search-btn').classList.remove('toggle-on')
+    clearSearchMarks()
+  })
+}
+
 export function initReaderEvents(refreshShelf: () => void): void {
+  initSearchEvents()
+  initHighlightEvents(() => readingId)
   $('#back-btn').addEventListener('click', () => {
     closeReader()
     refreshShelf()

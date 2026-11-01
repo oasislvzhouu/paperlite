@@ -137,7 +137,56 @@ export function registerIpc(): void {
     return recognizeFormula(dataUrl)
   })
 
-  /* ── 翻译持久缓存（按源文 SHA-256 全局去重） ── */
+  /* ── 划线高亮/笔记 ── */
+
+  ipcMain.handle(
+    'highlights:list',
+    (_e, readingId: number): unknown[] =>
+      getDb()
+        .prepare('SELECT * FROM highlights WHERE reading_id = ? ORDER BY block_index, start_offset')
+        .all(readingId)
+  )
+
+  ipcMain.handle(
+    'highlights:add',
+    (
+      _e,
+      readingId: number,
+      bi: number,
+      start: number,
+      end: number,
+      text: string,
+      color: string,
+      note: string
+    ): number => {
+      const res = getDb()
+        .prepare(
+          `INSERT INTO highlights
+           (reading_id, block_index, start_offset, end_offset, text, color, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(readingId, bi, start, end, text, color, note, new Date().toISOString())
+      return Number(res.lastInsertRowid)
+    }
+  )
+
+  ipcMain.handle(
+    'highlights:update',
+    (_e, id: number, color: string | null, note: string | null): boolean => {
+      if (color !== null) {
+        getDb().prepare('UPDATE highlights SET color = ? WHERE id = ?').run(color, id)
+      }
+      if (note !== null) {
+        getDb().prepare('UPDATE highlights SET note = ? WHERE id = ?').run(note, id)
+      }
+      return true
+    }
+  )
+
+  ipcMain.handle('highlights:remove', (_e, id: number): boolean => {
+    getDb().prepare('DELETE FROM highlights WHERE id = ?').run(id)
+    return true
+  })
 
   const shaOf = (t: string): string => createHash('sha256').update(t).digest('hex')
 
