@@ -123,13 +123,14 @@ export async function openReader(id: number): Promise<void> {
       cMapUrl: 'assets/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: 'assets/standard_fonts/',
-      isOffscreenCanvasSupported: false
+      isOffscreenCanvasSupported: false,
+    disableFontFace: true
     })
   }
   load()
   doc = await task!.promise
   // 会话级 worker 随机坏死检测：渲染探测失败 → 重建 worker 重载文档（最多 2 轮）
-  for (let attempt = 0; attempt < 2 && !(await quickRenderProbe()); attempt++) {
+  for (let attempt = 0; attempt < 1 && !(await quickRenderProbe()); attempt++) {
     await task!.destroy()
     recreatePdfWorker()
     load()
@@ -177,6 +178,9 @@ export async function openReader(id: number): Promise<void> {
     window.setTimeout(() => {
       if (readingId === id && mode === 'reflow') void upgradeFormulas()
     }, 12000)
+    window.setTimeout(() => {
+      if (readingId === id && mode === 'reflow') void attachTables()
+    }, 9000)
   } else {
     applyWidth()
     void render()
@@ -223,6 +227,10 @@ function renderReflow(): void {
         .map((src) => `<img src="${src}" alt="figure" loading="lazy" />`)
         .join('')
       parts.push(`<figure class="figure" data-bi="${bi}">${imgs}</figure>`)
+    } else if (b.kind === 'table') {
+      parts.push(
+        `<figure class="figure table" data-bi="${bi}"><figcaption>${body}</figcaption></figure>`
+      )
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
       const roleCls = b.role ? ` ${b.role}` : ''
@@ -296,7 +304,7 @@ async function probeRenderReady(): Promise<boolean> {
   if (!doc) return false
   try {
     const page = await doc.getPage(1)
-    for (let i = 0; i < 24; i++) {
+    for (let i = 0; i < 8; i++) {
       try {
         const vp = page.getViewport({ scale: 0.25 })
         const c = document.createElement('canvas')
@@ -321,9 +329,28 @@ async function probeRenderReady(): Promise<boolean> {
   return false
 }
 
+function showRenderDownTip(): void {
+  const g = globalThis as { __plRenderTipShown?: boolean }
+  if (g.__plRenderTipShown) return
+  g.__plRenderTipShown = true
+  const chip = document.querySelector('#trans-status') as HTMLElement | null
+  const text = document.querySelector('#trans-status-text') as HTMLElement | null
+  if (!chip || !text) return
+  text.textContent = '本会话图表渲染未就绪，重启应用可恢复'
+  chip.classList.remove('done')
+  chip.hidden = false
+  window.setTimeout(() => {
+    chip.classList.add('done')
+    window.setTimeout(() => (chip.hidden = true), 450)
+  }, 4000)
+}
+
 async function attachImages(): Promise<void> {
   if (!doc || mode !== 'reflow') return
-  if (!(await probeRenderReady())) return
+  if (!(await probeRenderReady())) {
+    showRenderDownTip()
+    return
+  }
   let inserted = 0
   for (let p = 1; p <= doc.numPages; p++) {
     if (readingId === 0) return
@@ -359,6 +386,54 @@ async function attachImages(): Promise<void> {
         chip.classList.add('done')
         window.setTimeout(() => (chip.hidden = true), 450)
       }, 2000)
+    }
+  }
+}
+
+/** 表格块渲染：整块矩形裁图（含转曲矢量表格） */
+async function attachTables(): Promise<void> {
+  if (!blocks || !doc || mode !== 'reflow') return
+  await probeRenderReady()
+  for (const b of blocks) {
+    if (b.kind !== 'table' || !b.rect || readingId === 0) continue
+    try {
+      const fig = document.querySelector<HTMLElement>(`figure.table[data-bi]`)
+      const target = document.querySelector(`figure.table[data-bi="${blocks.indexOf(b)}"]`)
+      if (!target || target.querySelector('img')) continue
+      const page = await doc.getPage(b.page)
+      const vp = page.getViewport({ scale: 1 })
+      const scale = Math.min(3, 2000 / vp.width)
+      const viewport = page.getViewport({ scale })
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.floor(viewport.width)
+      canvas.height = Math.floor(viewport.height)
+      const cx = canvas.getContext('2d')
+      if (!cx) continue
+      await Promise.race([
+        page.render({ canvasContext: cx, viewport }).promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('table-render-timeout')), 6000))
+      ])
+      const pad = 3
+      const x = Math.max(0, (b.rect.x0 - pad) * scale)
+      const y = Math.max(0, (b.rect.y0 - pad) * scale)
+      const w = Math.min(canvas.width - x, (b.rect.x1 - b.rect.x0 + pad * 2) * scale)
+      const h = Math.min(canvas.height - y, (b.rect.y1 - b.rect.y0 + pad * 2) * scale)
+      if (w < 20 || h < 20) continue
+      const out = document.createElement('canvas')
+      out.width = Math.floor(w)
+      out.height = Math.floor(h)
+      const octx = out.getContext('2d')
+      if (!octx) continue
+      octx.fillStyle = '#fff'
+      octx.fillRect(0, 0, out.width, out.height)
+      octx.drawImage(canvas, x, y, w, h, 0, 0, out.width, out.height)
+      const img = document.createElement('img')
+      img.src = out.toDataURL('image/jpeg', 0.92)
+      img.style.maxWidth = '100%'
+      target.appendChild(img)
+      void fig
+    } catch {
+      /* 单表失败跳过 */
     }
   }
 }

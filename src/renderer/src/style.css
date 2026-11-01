@@ -624,3 +624,19 @@ body.reflow-mode .zoomer { display: none; }
 #reflow-article p.para-cont { margin-top: -0.6em; }
 /* 列表项：悬挂缩进 */
 #reflow-article p.list-item { margin: 0.35em 0 0.35em 2em; text-indent: -1.2em; }
+
+/* 表格块：表注在上方，表格体为渲染图 */
+#reflow-article figure.table { margin: 1.4em auto; text-align: center; }
+#reflow-article figure.table figcaption {
+  font-size: 0.85em;
+  color: var(--muted);
+  margin-bottom: 0.5em;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+#reflow-article figure.table img {
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}

@@ -96,7 +96,8 @@ async function generateThumb(id: number): Promise<void> {
       cMapUrl: 'assets/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: 'assets/standard_fonts/',
-      isOffscreenCanvasSupported: false
+      isOffscreenCanvasSupported: false,
+    disableFontFace: true
     })
     const d = await task.promise
     const page = await d.getPage(1)
@@ -131,7 +132,8 @@ async function prefetchTranslations(meta: ReadingMeta): Promise<void> {
       cMapUrl: 'assets/cmaps/',
       cMapPacked: true,
       standardFontDataUrl: 'assets/standard_fonts/',
-      isOffscreenCanvasSupported: false
+      isOffscreenCanvasSupported: false,
+    disableFontFace: true
     })
     const d = await task.promise
     const blks = await extractReflowBlocks(d)

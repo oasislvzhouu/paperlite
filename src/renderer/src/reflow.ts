@@ -10,7 +10,7 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 
 export interface ReflowBlock {
-  kind: 'heading' | 'paragraph' | 'formula' | 'image'
+  kind: 'heading' | 'paragraph' | 'formula' | 'image' | 'table'
   /** heading 级别：1 = 最大字号 */
   level?: number
   /** 来源 PDF 页码（1 起） */
@@ -93,6 +93,8 @@ export interface Line {
   html: string
   /** 图片行：裁剪 dataURL */
   image?: string
+  /** 表格区域：该行为表注，附带整表渲染矩形（top-down pt） */
+  tableZone?: { x0: number; x1: number; y0: number; y1: number }
 }
 
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
@@ -471,6 +473,18 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
+    if (l.tableZone) {
+      flush()
+      blocks.push({
+        kind: 'table',
+        page: l.page,
+        text: l.text.replace(/\s+/g, ' ').trim(),
+        rect: l.tableZone,
+        top: l.yTop
+      })
+      continue
+    }
+
     if (l.image) {
       // 连续图片行（同一张图被拆成多张）合并进一个图片块
       if (bufImages.length === 0) flush()
@@ -842,11 +856,74 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   perPage.forEach((p, i) => {
     ordered.push(...orderLines(kept[i], p.width))
   })
+  detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
+}
+
+/* ── 表格区域识别：表注（TABLE II / 表2，含罗马数字）之后的表格体行
+ *    整体渲染为图片块，避免单元格文本被线性化成乱序段落 ── */
+
+const TABLE_CAPTION_RE = /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
+
+function detectTableZones(lines: Line[], bodySize: number): void {
+  const isTableRow = (l: Line): boolean => {
+    const t = l.text.replace(/\s/g, '')
+    if (t.length <= 8) return true // 短单元格
+    if (l.fragCount >= 3 && l.text.length < 90) return true // 多列对齐行（限长防吞正文）
+    if (t.length < 32 && /\d|[/.]/.test(t)) return true // 数字/斜杠数据行
+    return false
+  }
+  const isProse = (l: Line): boolean =>
+    l.text.length > 60 && l.fragCount <= 2 && !TABLE_CAPTION_RE.test(l.text)
+
+  for (let i = 0; i < lines.length; i++) {
+    const cap = lines[i]
+    if (!cap.tableZone && !TABLE_CAPTION_RE.test(cap.text.trim())) continue
+    if (cap.text.trim().length > 130) continue
+    // 收集表注之后同页、yTop 递增的表格体行
+    const rows: Line[] = []
+    let j = i + 1
+    for (; j < lines.length; j++) {
+      const l = lines[j]
+      if (l.page !== cap.page) break
+      if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）→ 表格不会跨栏
+      if (isProse(l)) break
+      if (!isTableRow(l)) break
+      rows.push(l)
+    }
+    if (rows.length < 2) {
+      // 兜底：表格体为转曲矢量（无文本层无图片对象）→ 表注到页底整块渲染
+      const pageH = 792
+      cap.tableZone = {
+        x0: Math.max(20, cap.x0 - bodySize * 4),
+        x1: Math.min(592, cap.x1 + bodySize * 4),
+        y0: cap.yTop - 2,
+        y1: pageH - 26
+      }
+      continue
+    }
+    // 表格高度上限（约 320pt）：截断超出的行，防止误吸收正文
+    const capRows: Line[] = []
+    for (const r of rows) {
+      if (r.yTop + (r.fontSize || 8) - cap.yTop > 320) break
+      capRows.push(r)
+    }
+    if (capRows.length >= 2) rows.length = capRows.length
+    if (rows.length < 2) continue
+    // 表注行与表格体合并为 table 块（带渲染矩形），移除体行
+    const all = [cap, ...rows]
+    cap.tableZone = {
+      x0: Math.min(...all.map((l) => l.x0)),
+      x1: Math.max(...all.map((l) => l.x1)),
+      y0: Math.min(...all.map((l) => l.yTop)) - 2,
+      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 2
+    }
+    lines.splice(i + 1, rows.length)
+  }
 }
 
 /** 公式后的续接句（"where W denotes…"）不打段前空隙，视觉上延续前段 */
@@ -870,7 +947,7 @@ function markFormulaContinuation(blocks: ReflowBlock[]): void {
 }
 
 /** 图题/表题识别（"Fig. 1. xxx"、"图2 xxx"、"TABLE II"）→ caption 角色 */
-const CAPTION_RE = /^\s*(fig\.?|figure|图|表|table)\s*\d+\s*[.、:：)）,，-]?/i
+const CAPTION_RE = /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)|^\s*(表|table)\s*(?:[IVXLC]{1,6}|\d+)/i
 function markCaptions(blocks: ReflowBlock[]): void {
   for (const b of blocks) {
     if (b.kind === 'paragraph' && !b.role && b.text.length < 350 && CAPTION_RE.test(b.text)) {
