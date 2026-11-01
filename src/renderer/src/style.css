@@ -192,6 +192,14 @@ button.toggle-on { background: rgba(79, 140, 255, 0.2); border-color: var(--acce
 }
 #reader-title { flex: 1; font-weight: 600; }
 .pager, .zoomer { display: flex; align-items: center; gap: 6px; }
+.pager .page-box {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 #page-input {
   width: 56px;
   text-align: center;
