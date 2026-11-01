@@ -359,6 +359,17 @@ body.reflow-mode .zoomer { display: none; }
   opacity: 0.75;
   margin: 0.3em 0;
 }
+/* 图题/表题：紧跟图表之后，居中小字 */
+#reflow-article p.caption {
+  text-align: center;
+  text-indent: 0;
+  color: var(--muted);
+  font-size: 0.85em;
+  line-height: 1.55;
+  margin: -0.6em auto 1.3em;
+  max-width: 88%;
+}
+#reflow-article p.caption + figure.figure { margin-top: 0.4em; }
 
 /* 公式块：数学字体独立排版（引擎按嵌入数学字体识别） */
 #reflow-article .formula {

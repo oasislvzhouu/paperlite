@@ -25,8 +25,8 @@ export interface ReflowBlock {
   rect?: { x0: number; x1: number; y0: number; y1: number }
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
-  /** 首页元数据角色（对齐原版的结构化首页） */
-  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta'
+  /** 元数据角色：首页结构化 + 全文图注 */
+  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta' | 'caption'
 }
 
 interface RawTextItem {
@@ -598,7 +598,8 @@ export async function cropPageImages(
   g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
   if (rects.length === 0) return []
 
-  const scale = Math.min(2, 1100 / viewportW)
+  // 高分辨率裁剪（3×：高清屏上拉伸到正文宽度依然清晰）
+  const scale = Math.min(3, 2000 / viewportW)
   const viewport = page.getViewport({ scale })
   const canvas = document.createElement('canvas')
   canvas.width = Math.floor(viewport.width)
@@ -656,7 +657,7 @@ export async function cropPageImages(
       shortFragRatio: 0,
       fragCount: 1,
       eqNumbered: false,
-      image: out.toDataURL('image/jpeg', 0.85)
+      image: out.toDataURL('image/jpeg', 0.92)
     })
   }
   const g2 = globalThis as { __plImgLines?: Record<number, number> }
@@ -797,5 +798,16 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   })
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
+  markCaptions(blocks)
   return blocks
+}
+
+/** 图题/表题识别（"Fig. 1. xxx"、"图2 xxx"、"TABLE II"）→ caption 角色 */
+const CAPTION_RE = /^\s*(fig\.?|figure|图|表|table)\s*\d+\s*[.、:：)）,，-]?/i
+function markCaptions(blocks: ReflowBlock[]): void {
+  for (const b of blocks) {
+    if (b.kind === 'paragraph' && !b.role && b.text.length < 350 && CAPTION_RE.test(b.text)) {
+      b.role = 'caption'
+    }
+  }
 }

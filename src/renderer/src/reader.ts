@@ -593,12 +593,30 @@ export function initReaderEvents(refreshShelf: () => void): void {
     ;(e.currentTarget as HTMLElement).classList.toggle('toggle-on', fitWidth)
     void render()
   })
-  $('#page-wrap').addEventListener('wheel', (e) => {
-    if (!doc || !e.ctrlKey || mode !== 'original') return
-    e.preventDefault()
-    zoom = clamp(zoom * (e.deltaY < 0 ? 1.1 : 0.9), 0.3, 5)
-    void render()
-  })
+  $('#page-wrap').addEventListener(
+    'wheel',
+    (e) => {
+      if (!doc || mode !== 'original') return
+      const wrap = $('#page-wrap')
+      if (e.ctrlKey) {
+        e.preventDefault()
+        zoom = clamp(zoom * (e.deltaY < 0 ? 1.1 : 0.9), 0.3, 5)
+        void render()
+        return
+      }
+      // 滚轮边缘翻页：页面顶/底再继续滚动 = 上一页/下一页
+      const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 2
+      const atTop = wrap.scrollTop <= 2
+      if (e.deltaY > 0 && atBottom) {
+        e.preventDefault()
+        goTo(pageNum + 1)
+      } else if (e.deltaY < 0 && atTop) {
+        e.preventDefault()
+        goTo(pageNum - 1)
+      }
+    },
+    { passive: false }
+  )
   $('#reflow-wrap').addEventListener('scroll', () => {
     clearTimeout(scrollTimer)
     scrollTimer = window.setTimeout(syncPageFromScroll, 250)
