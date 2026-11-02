@@ -183,7 +183,9 @@ export async function openReader(id: number): Promise<void> {
     }, 9000)
   } else {
     applyWidth()
-    void render()
+    pdfScrollBuilt = false
+    await buildPdfScroll()
+    goTo(pageNum)
   }
   toc = await loadOutline(doc)
   renderToc()
@@ -662,32 +664,96 @@ function syncPageFromScroll(): void {
 
 /* ── 原版模式 ─────────────────────────────── */
 
-async function render(): Promise<void> {
+/* ── 原版模式：连续滚动（懒渲染） ── */
+
+let pdfScrollBuilt = false
+let pdfObserver: IntersectionObserver | null = null
+
+function pdfScale(): number {
+  if (!doc) return 1.25
+  return fitWidth ? (Math.max(200, $('#page-wrap').clientWidth - 48) / 612) * zoom : 1.25 * zoom
+}
+
+/** 构建/重建纵向页列（占位高度先行，进入视口再渲染画布） */
+async function buildPdfScroll(): Promise<void> {
   if (!doc) return
-  const page = await doc.getPage(pageNum)
-  const base = page.getViewport({ scale: 1 })
   const wrap = $('#page-wrap')
-  const avail = Math.max(wrap.clientWidth - 48, 200)
-  const scale = (fitWidth ? avail / base.width : 1.25) * zoom
-  const viewport = page.getViewport({ scale })
-  const canvas = $('#pdf-canvas') as HTMLCanvasElement
-  const dpr = window.devicePixelRatio || 1
-  canvas.width = Math.floor(viewport.width * dpr)
-  canvas.height = Math.floor(viewport.height * dpr)
-  canvas.style.width = `${Math.floor(viewport.width)}px`
-  canvas.style.height = `${Math.floor(viewport.height)}px`
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  await page.render({
-    canvasContext: ctx,
-    viewport,
-    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined
-  }).promise
-  ;($('#page-input') as HTMLInputElement).value = String(pageNum)
-  clearTimeout(saveTimer)
-  saveTimer = window.setTimeout(() => {
-    void window.paperlite.saveProgress(readingId, pageNum, doc?.numPages ?? null)
-  }, 600)
+  const scroll = $('#pdf-scroll')
+  pdfObserver?.disconnect()
+  scroll.innerHTML = ''
+  const scale = pdfScale()
+  const vp1 = (await doc.getPage(1)).getViewport({ scale: 1 })
+  for (let p = 1; p <= doc.numPages; p++) {
+    const div = document.createElement('div')
+    div.className = 'pdf-page'
+    div.dataset['page'] = String(p)
+    div.style.height = `${Math.floor(vp1.height * scale)}px`
+    div.style.width = `${Math.floor(vp1.width * scale)}px`
+    div.innerHTML = '<div class="pdf-ph">…</div>'
+    scroll.appendChild(div)
+  }
+  pdfObserver = new IntersectionObserver(
+    (entries) => {
+      for (const en of entries) {
+        if (en.isIntersecting) void renderPdfPage(Number((en.target as HTMLElement).dataset['page']))
+      }
+    },
+    { root: wrap, rootMargin: '700px 0px' }
+  )
+  scroll.querySelectorAll('.pdf-page').forEach((el) => pdfObserver?.observe(el))
+  pdfScrollBuilt = true
+}
+
+/** 渲染单页画布（带超时护栏；成功后替换占位） */
+async function renderPdfPage(p: number): Promise<void> {
+  if (!doc) return
+  const div = $(`#pdf-scroll .pdf-page[data-page="${p}"]`)
+  if (!div || div.dataset['rendered'] === '1') return
+  const scale = pdfScale()
+  if (div.dataset['zoom'] === String(scale.toFixed(3))) return
+  div.dataset['zoom'] = scale.toFixed(3)
+  try {
+    const page = await doc.getPage(p)
+    const viewport = page.getViewport({ scale })
+    const canvas = document.createElement('canvas')
+    const dpr = window.devicePixelRatio || 1
+    canvas.width = Math.floor(viewport.width * dpr)
+    canvas.height = Math.floor(viewport.height * dpr)
+    canvas.style.width = `${Math.floor(viewport.width)}px`
+    canvas.style.height = `${Math.floor(viewport.height)}px`
+    const cx = canvas.getContext('2d')
+    if (!cx) return
+    await Promise.race([
+      page.render({ canvasContext: cx, viewport, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined }).promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('pdf-render-timeout')), 10000))
+    ])
+    if (div.dataset['zoom'] !== scale.toFixed(3)) return // 缩放已变，丢弃
+    div.innerHTML = ''
+    div.appendChild(canvas)
+    div.dataset['rendered'] = '1'
+  } catch {
+    div.dataset['rendered'] = ''
+    div.innerHTML = '<div class="pdf-ph">渲染未就绪</div>'
+  }
+}
+
+/** 滚动位置 → 当前页码（同步 UI 与进度） */
+let scrollSyncTimer: number | undefined
+function syncPageFromPdfScroll(): void {
+  const wrap = $('#page-wrap')
+  const pages = [...wrap.querySelectorAll<HTMLElement>('.pdf-page')]
+  let current = 1
+  for (const el of pages) {
+    if (el.offsetTop <= wrap.scrollTop + 120) current = Number(el.dataset['page'])
+  }
+  if (current !== pageNum && doc) {
+    pageNum = Math.min(current, doc.numPages)
+    ;($('#page-input') as HTMLInputElement).value = String(pageNum)
+    clearTimeout(scrollSyncTimer)
+    scrollSyncTimer = window.setTimeout(() => {
+      void window.paperlite.saveProgress(readingId, pageNum, doc?.numPages ?? null)
+    }, 600)
+  }
 }
 
 /* ── 通用导航 ─────────────────────────────── */
@@ -701,7 +767,9 @@ function goTo(n: number): void {
     sep?.scrollIntoView({ block: 'start' })
     ;($('#page-input') as HTMLInputElement).value = String(target)
   } else {
-    void render()
+    const el = $(`#pdf-scroll .pdf-page[data-page="${target}"]`)
+    el?.scrollIntoView({ block: 'start' })
+    ;($('#page-input') as HTMLInputElement).value = String(target)
   }
 }
 
@@ -797,7 +865,7 @@ export function initReaderEvents(refreshShelf: () => void): void {
   $('#original-btn').addEventListener('click', () => {
     mode = 'original'
     applyMode()
-    void render()
+    if (!pdfScrollBuilt) void buildPdfScroll().then(() => goTo(pageNum))
   })
   $('#font-dec').addEventListener('click', () => {
     reflowFont = clamp(reflowFont - 1, 13, 30)
@@ -833,39 +901,28 @@ export function initReaderEvents(refreshShelf: () => void): void {
 
   $('#zoom-in-btn').addEventListener('click', () => {
     zoom = clamp(zoom * 1.2, 0.3, 5)
-    void render()
+    void buildPdfScroll().then(() => goTo(pageNum))
   })
   $('#zoom-out-btn').addEventListener('click', () => {
     zoom = clamp(zoom / 1.2, 0.3, 5)
-    void render()
+    void buildPdfScroll().then(() => goTo(pageNum))
   })
   $('#fit-btn').addEventListener('click', (e) => {
     fitWidth = !fitWidth
     zoom = 1
     ;(e.currentTarget as HTMLElement).classList.toggle('toggle-on', fitWidth)
-    void render()
+    void buildPdfScroll().then(() => goTo(pageNum))
+  })
+  $('#page-wrap').addEventListener('scroll', () => {
+    if (mode === 'original') syncPageFromPdfScroll()
   })
   $('#page-wrap').addEventListener(
     'wheel',
     (e) => {
-      if (!doc || mode !== 'original') return
-      const wrap = $('#page-wrap')
-      if (e.ctrlKey) {
-        e.preventDefault()
-        zoom = clamp(zoom * (e.deltaY < 0 ? 1.1 : 0.9), 0.3, 5)
-        void render()
-        return
-      }
-      // 滚轮边缘翻页：页面顶/底再继续滚动 = 上一页/下一页
-      const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 2
-      const atTop = wrap.scrollTop <= 2
-      if (e.deltaY > 0 && atBottom) {
-        e.preventDefault()
-        goTo(pageNum + 1)
-      } else if (e.deltaY < 0 && atTop) {
-        e.preventDefault()
-        goTo(pageNum - 1)
-      }
+      if (!doc || mode !== 'original' || !e.ctrlKey) return
+      e.preventDefault()
+      zoom = clamp(zoom * (e.deltaY < 0 ? 1.1 : 0.9), 0.3, 5)
+      void buildPdfScroll().then(() => goTo(pageNum))
     },
     { passive: false }
   )

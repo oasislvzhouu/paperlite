@@ -328,15 +328,31 @@ button.toggle-on { background: rgba(79, 140, 255, 0.2); border-color: var(--acce
 
 #page-wrap {
   flex: 1;
-  overflow: auto;
-  display: flex;
-  justify-content: center;
-  padding: 24px;
+  overflow-y: auto;
+  padding: 24px 0 80px;
 }
-#pdf-canvas {
+#pdf-scroll {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.pdf-page {
   background: #fff;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
-  max-width: none;
+  position: relative;
+  overflow: hidden;
+}
+.pdf-page canvas { display: block; }
+.pdf-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #bbb;
+  font-size: 20px;
+  background: #fafafa;
 }
 
 /* ── 工具栏分组与分段控件 ─────────────────── */
