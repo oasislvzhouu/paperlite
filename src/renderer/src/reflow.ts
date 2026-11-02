@@ -704,7 +704,30 @@ export async function cropPageImages(
   if (rects.length === 0) return []
 
   const lines: Line[] = []
-  for (const r of rects) {
+  // 聚类合并：一幅图常由多个图片对象拼成（如网络结构图的部件、分层条带），
+  // 间距 <16pt 的矩形归拢为一个包围盒整裁，否则会碎成十几张碎图
+  const clusters: ImgRect[] = rects.map((r) => ({ ...r }))
+  let merged = true
+  while (merged) {
+    merged = false
+    outer: for (let a = 0; a < clusters.length; a++) {
+      for (let b = a + 1; b < clusters.length; b++) {
+        const m = clusters[a]
+        const r = clusters[b]
+        if (r.x0 <= m.x1 + 16 && r.x1 >= m.x0 - 16 && r.y0 <= m.y1 + 16 && r.y1 >= m.y0 - 16) {
+          m.x0 = Math.min(m.x0, r.x0)
+          m.x1 = Math.max(m.x1, r.x1)
+          m.y0 = Math.min(m.y0, r.y0)
+          m.y1 = Math.max(m.y1, r.y1)
+          clusters.splice(b, 1)
+          merged = true
+          break outer
+        }
+      }
+    }
+  }
+
+  for (const r of clusters) {
     const w = r.x1 - r.x0
     const h = r.y1 - r.y0
     if (w < 30 || h < 30) continue // 装饰性小图
