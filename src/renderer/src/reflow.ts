@@ -178,16 +178,29 @@ function joinFrags(frags: Frag[]): { text: string; html: string } {
 
 /** 基线聚类：把文本项组装成行（同一基线 ± 容差，容差覆盖上下标偏移），再按列边界/栏间距切分 */
 function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
-  // 页级列起点：全部文本项 x0 聚类（相邻差 > 30 断开），用于识别栏/边栏边界
+  // 页级列锚：x0 直方图（10pt 桶 + 3 桶平滑）找密度峰，峰值 ≥ max(6, n×6%) 记锚、锚间距 ≥ 90pt。
+  // 逐项聚类会被居中公式/列表的连续碎片焊死（第 2 页 starts 只剩 1 个导致左右栏合并交错）
   const starts: number[] = []
-  let curMax = Number.NEGATIVE_INFINITY
-  for (const x of frags.map((f) => f.x).sort((a, b) => a - b)) {
-    if (x - curMax > 30) starts.push(x)
-    curMax = Math.max(curMax, x)
+  if (frags.length > 20) {
+    const buckets = new Map<number, number>()
+    for (const f of frags) {
+      const k = Math.floor(f.x / 10)
+      buckets.set(k, (buckets.get(k) ?? 0) + 1)
+    }
+    const keys = [...buckets.keys()].sort((a, b) => a - b)
+    const threshold = Math.max(6, frags.length * 0.06)
+    let lastAnchor = -Infinity
+    for (const k of keys) {
+      const c = (buckets.get(k - 1) ?? 0) + (buckets.get(k) ?? 0) + (buckets.get(k + 1) ?? 0)
+      if (c >= threshold && k * 10 - lastAnchor >= 90) {
+        starts.push(k * 10 + 5)
+        lastAnchor = k * 10
+      }
+    }
   }
   const colIndexOf = (x: number): number => {
     let k = 0
-    for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 5) k = i
+    for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 6) k = i
     return k
   }
 
