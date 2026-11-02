@@ -25,6 +25,8 @@ export interface ReflowBlock {
   rect?: { x0: number; x1: number; y0: number; y1: number }
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
+  /** 首行字号（脚注检测用） */
+  firstFontSize?: number
   /** 元数据角色：首页结构化 + 全文图注 */
   role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta' | 'caption' | 'list-item' | 'para-cont'
 }
@@ -447,7 +449,10 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           y1: Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6)))
         }
       }
-      if (bufLines[0]) block.top = bufLines[0].yTop
+      if (bufLines[0]) {
+        block.top = bufLines[0].yTop
+        block.firstFontSize = bufLines[0].fontSize
+      }
       if (block.kind === 'paragraph' && LIST_ITEM_RE.test(text.trim()) && text.length < 160 && !/^([IVXLC]{1,5})\./.test(text.trim())) block.role = 'list-item'
       blocks.push(block)
     }
@@ -859,9 +864,66 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
+  demoteFootnotes(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
+}
+
+/** 首页脚注降级：左栏底部基金/作者/DOI 脚注（小字号+特征词）移到页尾，
+ *  并合并被脚注隔断的跨栏段落（前块无句号结尾 + 后块小写开头） */
+const FOOTNOTE_RE =
+  /received.*accepted|date of (publication|current version)|this work was supported|corresponding author|are with the (college|school|department)|e-mail:|digital object identifier|©/i
+
+function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
+  // 以同页正文块的最大首行字号为基准（bodySize 会被首页小字行拉低，不可靠）
+  let maxFfs = bodySize
+  for (const b of blocks) {
+    if (b.page === 1 && b.kind === 'paragraph' && !b.role && b.firstFontSize) {
+      maxFfs = Math.max(maxFfs, b.firstFontSize)
+    }
+  }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (
+      b.kind !== 'paragraph' ||
+      b.role ||
+      b.page !== 1 ||
+      (b.firstFontSize ?? maxFfs) >= maxFfs * 0.88 ||
+      !FOOTNOTE_RE.test(b.text)
+    ) {
+      continue
+    }
+    b.role = 'meta'
+    // 移到第 1 页块序列末尾
+    blocks.splice(i, 1)
+    let lastP1 = blocks.length
+    for (let j = blocks.length - 1; j >= 0; j--) {
+      if (blocks[j].page === 1) {
+        lastP1 = j + 1
+        break
+      }
+    }
+    blocks.splice(lastP1, 0, b)
+  }
+  // 合并被脚注隔断的段落：前块不以句号结尾 + 后块小写开头 + 同页
+  for (let i = blocks.length - 2; i >= 0; i--) {
+    const a = blocks[i]
+    const b = blocks[i + 1]
+    if (
+      a.kind === 'paragraph' &&
+      b.kind === 'paragraph' &&
+      !a.role &&
+      !b.role &&
+      a.page === b.page &&
+      !/[.!?;:）)"']$/.test(a.text.trim()) &&
+      /^[a-z(]/.test(b.text.trim())
+    ) {
+      a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ')
+      a.html = `${a.html ?? a.text} ${b.html ?? b.text}`
+      blocks.splice(i + 1, 1)
+    }
+  }
 }
 
 /* ── 表格区域识别：表注（TABLE II / 表2，含罗马数字）之后的表格体行

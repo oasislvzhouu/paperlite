@@ -576,6 +576,8 @@ async function hydrateTranslations(): Promise<void> {
       const btn = $('#translate-btn') as HTMLButtonElement
       btn.classList.add('toggle-on')
       btn.textContent = hits >= paras.length ? '已译' : `译 ${hits}/${paras.length}`
+      // 缓存不完整（重排版本变更导致段落键失配）→ 自动补翻缺失段
+      if (hits < paras.length) void translateFlow()
     }
   } catch {
     /* 缓存不可用不影响阅读 */
