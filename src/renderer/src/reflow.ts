@@ -99,6 +99,7 @@ export interface Line {
   tableZone?: { x0: number; x1: number; y0: number; y1: number }
 }
 
+console.error(String.fromCharCode(77,65,82,75,69,82), "markCaptions@1160,mergeDebris@999,ver3-anchors");
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
 
 /** 版权/授权样板文字（出版社首页边栏/页脚，不属于正文内容） */
@@ -234,9 +235,6 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
     }
     starts.sort((a, b) => a - b)
   }
-  if (process.env.REFLOW_DBG) {
-    console.error('page', page, 'groups', groups.length, 'starts', JSON.stringify(starts))
-  }
   const colIndexOf = (x: number): number => {
     let k = 0
     for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 6) k = i
@@ -245,6 +243,18 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
 
   const lines: Line[] = []
   for (const g of groups) {
+    const gSize = median(g.map((f) => f.fontSize))
+    const gSpan = Math.max(...g.map((f) => f.x + f.w)) - Math.min(...g.map((f) => f.x))
+    // 跨栏标题行整行保留，不做列切分——否则标题被拦腰切断。
+    // 两类特征：大字号宽行；全大写行（IEEE small caps 标题字号与正文相近）
+    const gText0 = g.map((f) => f.text).join('')
+    const letters0 = gText0.replace(/[^A-Za-z]/g, '')
+    const upperRatio =
+      letters0.length >= 6
+        ? [...letters0].filter((c) => c === c.toUpperCase()).length / letters0.length
+        : 0
+    const isWideHeading =
+      (gSize >= 13 && gSpan > 150) || (upperRatio >= 0.85 && gSpan > 140)
     // 同一基线上，按列边界与栏间距拆分（双栏论文的栏间距 >> 词间距）
     const byX = [...g].sort((a, b) => a.x - b.x)
     const subgroups: Frag[][] = []
@@ -254,7 +264,11 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
     for (const f of byX) {
       const gutter = Math.max(12, 2.2 * f.fontSize)
       const col = colIndexOf(f.x)
-      if (sub.length > 0 && (f.x - prevEnd > gutter || (starts.length > 1 && col !== subCol))) {
+      if (
+        sub.length > 0 &&
+        !isWideHeading &&
+        (f.x - prevEnd > gutter || (starts.length > 1 && col !== subCol))
+      ) {
         subgroups.push(sub)
         sub = []
       }
@@ -507,14 +521,28 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
 
-    // 孤儿上下标碎片：整行都是小字号（公式的下标散件，如 7pt 的 "t"/"u trn"）且极短
-    // → 直接并入前一块（公式块的 rect 也会随之包含它），不独立成段
+    // 孤儿上下标碎片：整行都是小字号（公式的下标散件，如 7pt 的 "t"/"u trn"）
+    // → 并入前一块；含数学特征的中短碎片行（display 公式的下标聚合行）并入前公式块
     const tinyDebris =
       l.fontSize > 0 &&
-      l.fontSize < bodySize * 0.8 &&
-      l.text.replace(/\s/g, '').length <= 12 &&
+      l.fontSize < bodySize * 0.85 &&
+      !l.eqNumbered &&
+      (l.text.replace(/\s/g, '').length <= 12 ||
+        (l.charMathRatio >= 0.12 && l.text.length <= 80))
+    // 公式块后的小字号行：display 公式的下标散件，无条件并入（字号是强证据）
+    if (
+      bufKind === 'formula' &&
+      bufT.length > 0 &&
+      l.fontSize > 0 &&
+      l.fontSize < bodySize * 0.85 &&
       !l.eqNumbered
-    if (tinyDebris && bufT.length > 0 && bufKind !== 'heading') {
+    ) {
+      bufT.push(l.text)
+      bufH.push(l.html)
+      bufLines.push(l)
+      continue
+    }
+    if (tinyDebris && bufT.length > 0 && l.text.replace(/\s/g, '').length <= 12) {
       bufT.push(l.text)
       bufH.push(l.html)
       bufLines.push(l)
@@ -934,9 +962,20 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   const ordered: Line[] = []
   perPage.forEach((p, i) => {
     const ol = orderLines(kept[i], p.width)
-    if (process.env.REFLOW_DBG3 && i === 1) {
-      console.error('p2 ordered 前 12 行:')
-      ol.slice(0, 12).forEach((l, k) => console.error('  ' + k, 'x=[' + l.x0.toFixed(0) + ',' + l.x1.toFixed(0) + ']', JSON.stringify(l.text.slice(0, 40))))
+    // 行间浮动公式碎片：挤在两正文行行距里的短数学行（display 公式
+    // 前后有段距不触发），按 y 排序会插在上一行和下一行之间造成交错，
+    // 延迟到下一正文行之后才符合阅读顺序
+    for (let k = 0; k < ol.length - 1; k++) {
+      const l = ol[k]
+      const n = ol[k + 1]
+      const isFloatMath =
+        (l.mathRatio >= 0.4 || l.charMathRatio >= 0.25) && l.text.length < 60 && l.text.trim().length > 0
+      const nextIsProse = n.mathRatio < 0.2 && n.charMathRatio < 0.12 && n.text.length > 30
+      const tight = n.page === l.page && n.yTop >= l.yTop && n.yTop - l.yTop < Math.max(l.fontSize, 10) * 1.1
+      if (isFloatMath && nextIsProse && tight) {
+        ;[ol[k], ol[k + 1]] = [ol[k + 1], ol[k]]
+        k++ // 跳过换过来的正文行
+      }
     }
     ordered.push(...ol)
   })
@@ -944,15 +983,57 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
+  mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
 }
 
+/** display 公式块后的小字号下标散件段：并回公式块（字号 <0.85×正文为判据） */
+function mergeFormulaDebris(blocks: ReflowBlock[], bodySize: number): void {
+  const isDebrisPara = (n: ReflowBlock): boolean => {
+    // 字号判据可能被断段合并洗掉（碎片与正文行合并后继承正文字号），
+    // 用碎片词特征兜底：孤立单字母词（i i i a）占比高的短段是公式散件
+    if ((n.firstFontSize ?? bodySize) < bodySize * 0.85) return true
+    const words = n.text.split(/\s+/).filter(Boolean)
+    const shortWords = words.filter((w) => w.length <= 1).length
+    return words.length > 5 && shortWords / words.length >= 0.2
+  }
+  for (let i = blocks.length - 2; i >= 0; i--) {
+    const f = blocks[i]
+    if (f.kind !== 'formula') continue
+    // 迭代吸收公式后的连续碎片段（可能多条）
+    let j = i + 1
+    let absorbed = 0
+    while (j < blocks.length && blocks[j].kind === 'paragraph' && isDebrisPara(blocks[j])) {
+      const n = blocks[j]
+      f.text = `${f.text} ${n.text}`.replace(/\s+/g, ' ')
+      if (n.html) f.html = `${f.html ?? ''} ${n.html}`
+      if (n.rect && f.rect) {
+        f.rect = {
+          x0: Math.min(f.rect.x0, n.rect.x0),
+          x1: Math.max(f.rect.x1, n.rect.x1),
+          y0: Math.min(f.rect.y0, n.rect.y0),
+          y1: Math.max(f.rect.y1, n.rect.y1)
+        }
+      }
+      absorbed++
+      j++
+    }
+    if (absorbed > 0) blocks.splice(i + 1, absorbed)
+  }
+  // 兜底：吸收后公式块内仍含孤立单字母词串（跨栏碎片残余），移除
+  for (const b of blocks) {
+    if (b.kind !== 'formula') continue
+    const cleaned = b.text.replace(/(?:\b[a-z]\b\s*){2,}/gi, '')
+    b.text = cleaned.replace(/\s+/g, ' ').trim()
+  }
+}
+
 /** 首页脚注降级：左栏底部基金/作者/DOI 脚注（小字号+特征词）移到页尾，
  *  并合并被脚注隔断的跨栏段落（前块无句号结尾 + 后块小写开头） */
 const FOOTNOTE_RE =
-  /received.*accepted|date of (publication|current version)|this work was supported|corresponding author|are with the (college|school|department)|e-mail:|digital object identifier|©/i
+  /received\b.*accepted|date of (publication|current version)|this work was supported|corresponding author|are with the (college|school|department)|e-mail:|digital object identifier|©/i
 
 function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
   // 以同页正文块的最大首行字号为基准（bodySize 会被首页小字行拉低，不可靠）
@@ -1068,7 +1149,7 @@ function detectTableZones(lines: Line[], bodySize: number): void {
 }
 
 /** 公式后的续接句（"where W denotes…"）不打段前空隙，视觉上延续前段 */
-const CONT_SENT_RE = /^(where|here|and|but|so|thus|then|such|in which|其中|式中|其中，)|[a-z]/i
+const CONT_SENT_RE = /^(where|here|and|but|so|thus|then|such|in which|其中|式中|其中，)\b|[a-z]/i
 function markFormulaContinuation(blocks: ReflowBlock[]): void {
   for (let i = 2; i < blocks.length; i++) {
     const a = blocks[i - 2]
@@ -1088,11 +1169,17 @@ function markFormulaContinuation(blocks: ReflowBlock[]): void {
 }
 
 /** 图题/表题识别（"Fig. 1. xxx"、"图2 xxx"、"TABLE II"）→ caption 角色 */
-const CAPTION_RE = /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)|^\s*(表|table)\s*(?:[IVXLC]{1,6}|\d+)/i
+const CAPTION_RE = /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)\b|^\s*(表|table)\s*(?:[IVXLC]{1,6}|\d+)\b/i
 function markCaptions(blocks: ReflowBlock[]): void {
+  let hits = 0
   for (const b of blocks) {
-    if (b.kind === 'paragraph' && !b.role && b.text.length < 350 && CAPTION_RE.test(b.text)) {
+    const m = CAPTION_RE.test(b.text)
+    if (m && b.kind === 'paragraph' && !b.role && b.text.length < 350) {
       b.role = 'caption'
+      hits++
+    } else if (m) {
+      console.error('[cap-debug] RE命中但未标:', b.kind, b.role ?? '-', b.text.length, JSON.stringify(b.text.slice(0, 30)))
     }
   }
+  console.error('[cap-debug] markCaptions 执行，标注', hits, '个 caption，RE 总命中', blocks.filter(b => CAPTION_RE.test(b.text)).length)
 }
