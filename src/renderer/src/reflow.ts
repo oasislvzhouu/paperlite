@@ -101,7 +101,6 @@ export interface Line {
   eqCollect?: boolean
 }
 
-console.error(String.fromCharCode(77,65,82,75,69,82), "markCaptions@1160,mergeDebris@999,ver3-anchors");
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
 
 /** 版权/授权样板文字（出版社首页边栏/页脚，不属于正文内容） */
@@ -1212,9 +1211,8 @@ function markCaptions(blocks: ReflowBlock[]): void {
     if (m && b.kind === 'paragraph' && !b.role && b.text.length < 350) {
       b.role = 'caption'
       hits++
-    } else if (m) {
+    } else if (m && (b.kind !== 'paragraph' || b.role)) {
       console.error('[cap-debug] RE命中但未标:', b.kind, b.role ?? '-', b.text.length, JSON.stringify(b.text.slice(0, 30)))
     }
   }
-  console.error('[cap-debug] markCaptions 执行，标注', hits, '个 caption，RE 总命中', blocks.filter(b => CAPTION_RE.test(b.text)).length)
 }
