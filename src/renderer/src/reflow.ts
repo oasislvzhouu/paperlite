@@ -104,7 +104,7 @@ const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
 
 /** 版权/授权样板文字（出版社首页边栏/页脚，不属于正文内容） */
 const COPYRIGHT_LINE_RE =
-  /rights\/index\.html|all rights reserved|authorized licensed use|personal use is permitted|requires IEEE permission|^\s*\d{4}-\d{3,5}[XS]?\s?©|©\s*\d{4}\s+(IEEE|Elsevier|Springer|The Author|by Elsevier)|ieee\.org\/publications|downloaded from (ieee )?xplore|版权所有|未经.{0,10}许可.{0,10}(转载|翻印|复制)/i
+  /rights\/index\.html|all rights reserved|authorized licensed use|personal use is permitted|requires IEEE permission|index\.html for more information|^\s*\d{4}-\d{3,5}[XS]?\s?©|©\s*\d{4}\s+(IEEE|Elsevier|Springer|The Author|by Elsevier)|ieee\.org\/publications|downloaded from (ieee )?xplore|版权所有|未经.{0,10}许可.{0,10}(转载|翻印|复制)/i
 
 function escapeHtmlStr(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
@@ -780,7 +780,7 @@ export async function cropPageImages(
       for (let b = a + 1; b < clusters.length; b++) {
         const m = clusters[a]
         const r = clusters[b]
-        if (r.x0 <= m.x1 + 16 && r.x1 >= m.x0 - 16 && r.y0 <= m.y1 + 16 && r.y1 >= m.y0 - 16) {
+        if (r.x0 <= m.x1 + 28 && r.x1 >= m.x0 - 28 && r.y0 <= m.y1 + 28 && r.y1 >= m.y0 - 16) {
           m.x0 = Math.min(m.x0, r.x0)
           m.x1 = Math.max(m.x1, r.x1)
           m.y0 = Math.min(m.y0, r.y0)
@@ -1121,8 +1121,8 @@ function detectTableZones(lines: Line[], bodySize: number): void {
       // 兜底：表格体为转曲矢量（无文本层无图片对象）→ 表注到页底整块渲染
       const pageH = 792
       cap.tableZone = {
-        x0: Math.max(20, cap.x0 - bodySize * 4),
-        x1: Math.min(592, cap.x1 + bodySize * 4),
+        x0: 20,
+        x1: 592,
         y0: cap.yTop - 2,
         y1: pageH - 26
       }
