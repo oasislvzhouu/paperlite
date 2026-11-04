@@ -200,25 +200,42 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
   }
   if (cur.length) groups.push(cur)
 
-  // 组级列锚：只统计每条基线（组）的行首 x0——行内公式碎片不是行首，
-  // 不参与直方图，不会把列锚检测焊死（frag 级统计的缺陷）
+  // 两阶段列锚：① frag 级宽候选（合并组会把右栏 frags 记到左桶，
+  // 组级统计会自我强化地丢锚——见第 2 页 starts=[35] 案例）；
+  // ② 组级验证：真锚必有多条行的行首落在其 ±6 内（行内公式
+  // 碎片的假锚只被 1-2 条行使用，淘汰）
   const starts: number[] = []
   {
+      const cand: number[] = []
     const buckets = new Map<number, number>()
-    for (const g of groups) {
-      const x0 = Math.min(...g.map((f) => f.x))
-      const k = Math.floor(x0 / 10)
+    for (const f of frags) {
+      const k = Math.floor(f.x / 10)
       buckets.set(k, (buckets.get(k) ?? 0) + 1)
     }
-    const threshold = Math.max(6, groups.length * 0.06)
-    let lastAnchor = -Infinity
+    const fThreshold = Math.max(3, groups.length * 0.12)
+    // 评分制：全部桶按密度出候选 → 按 frag 支持数降序贪心选间距 ≥90 的锚。
+    // 旧"先到先得+间距"会让假候选（公式碎片桶）占位挡掉真锚（第 2 页 275 挡 315）
+    const scored: Array<{ x: number; uses: number }> = []
     for (const k of [...buckets.keys()].sort((a, b) => a - b)) {
-      const c = (buckets.get(k - 1) ?? 0) + (buckets.get(k) ?? 0) + (buckets.get(k + 1) ?? 0)
-      if (c >= threshold && k * 10 - lastAnchor >= 90) {
-        starts.push(k * 10 + 5)
-        lastAnchor = k * 10
+      const self = buckets.get(k) ?? 0
+      const c = (buckets.get(k - 1) ?? 0) + self + (buckets.get(k + 1) ?? 0)
+      if (c >= fThreshold && self >= fThreshold * 0.5) {
+        const x = k * 10 + 5
+        let uses = 0
+        for (const f of frags) {
+          if (f.x >= x - 8 && f.x <= x + 8) uses++
+        }
+        if (uses >= Math.max(8, frags.length * 0.012)) scored.push({ x, uses })
       }
     }
+    scored.sort((a, b) => b.uses - a.uses)
+    for (const s2 of scored) {
+      if (starts.every((x) => Math.abs(s2.x - x) >= 90)) starts.push(s2.x)
+    }
+    starts.sort((a, b) => a - b)
+  }
+  if (process.env.REFLOW_DBG) {
+    console.error('page', page, 'groups', groups.length, 'starts', JSON.stringify(starts))
   }
   const colIndexOf = (x: number): number => {
     let k = 0
@@ -318,18 +335,31 @@ export function orderLines(lines: Line[], pageWidth: number): Line[] {
   const mid = pageWidth / 2
   const gutter = pageWidth * 0.02
   const isSpanning = (l: Line): boolean => l.x0 < mid - gutter && l.x1 > mid + gutter
-  const spanning = mainSorted.filter(isSpanning)
-  if (spanning.length >= mainSorted.length * 0.25) {
+  // 跨栏居中的窄公式行（display equation）：不是双栏证据，
+  // 参与统计会让跨栏公式多的页面误回退单栏（第 2 页交错根因）
+  const isNarrowFormula = (l: Line): boolean => {
+    const w = l.x1 - l.x0
+    return w < pageWidth * 0.6 && (l.mathRatio >= 0.3 || l.charMathRatio >= 0.1 || l.fragCount >= 5)
+  }
+  const realSpanning = mainSorted.filter((l) => isSpanning(l) && !isNarrowFormula(l))
+  const midFormulas = mainSorted.filter((l) => isSpanning(l) && isNarrowFormula(l))
+  if (realSpanning.length >= mainSorted.length * 0.25) {
     return [...mainSorted, ...sidebar.sort(topDown)] // 大量整行 → 单栏
   }
 
   // 跨栏行（标题/作者/通栏图表）不能进 left/right——此前它们会被双栏判定直接丢弃
+  // 分类必须互斥完备：右栏短行（x0≥mid 但 x1≤mid+gutter，如公式编号）
+  // 曾同时不满足两个判据掉出集合，令 left+right<80% 误回退单栏
   const rest = mainSorted.filter((l) => !isSpanning(l))
-  const left = rest.filter((l) => l.x1 <= mid + gutter)
-  const right = rest.filter((l) => l.x0 >= mid - gutter && l.x1 > mid + gutter)
+  const left = rest.filter((l) => l.x1 <= mid)
+  const right = rest.filter((l) => l.x1 > mid)
+  // 窄公式行按几何中心归入所在栏
+  for (const l of midFormulas) {
+    ;((l.x0 + l.x1) / 2 < mid + gutter ? left : right).push(l)
+  }
   if (left.length >= 3 && right.length >= 3 && left.length + right.length >= rest.length * 0.8) {
     return [
-      ...spanning.sort(topDown),
+      ...realSpanning.sort(topDown),
       ...left.sort(topDown),
       ...right.sort(topDown),
       ...sidebar.sort(topDown)
@@ -359,7 +389,7 @@ function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): Line[][
   }
   const repeated = new Set(
     [...headCount.entries()]
-      .filter(([, c]) => c >= Math.max(3, Math.ceil(pageCount * 0.5)))
+      .filter(([, c]) => c >= Math.max(3, Math.ceil(pageCount * 0.35)))
       .map(([t]) => t)
   )
 
@@ -903,7 +933,12 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
 
   const ordered: Line[] = []
   perPage.forEach((p, i) => {
-    ordered.push(...orderLines(kept[i], p.width))
+    const ol = orderLines(kept[i], p.width)
+    if (process.env.REFLOW_DBG3 && i === 1) {
+      console.error('p2 ordered 前 12 行:')
+      ol.slice(0, 12).forEach((l, k) => console.error('  ' + k, 'x=[' + l.x0.toFixed(0) + ',' + l.x1.toFixed(0) + ']', JSON.stringify(l.text.slice(0, 40))))
+    }
+    ordered.push(...ol)
   })
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
