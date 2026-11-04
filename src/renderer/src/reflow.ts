@@ -178,32 +178,6 @@ function joinFrags(frags: Frag[]): { text: string; html: string } {
 
 /** 基线聚类：把文本项组装成行（同一基线 ± 容差，容差覆盖上下标偏移），再按列边界/栏间距切分 */
 function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
-  // 页级列锚：x0 直方图（10pt 桶 + 3 桶平滑）找密度峰，峰值 ≥ max(6, n×6%) 记锚、锚间距 ≥ 90pt。
-  // 逐项聚类会被居中公式/列表的连续碎片焊死（第 2 页 starts 只剩 1 个导致左右栏合并交错）
-  const starts: number[] = []
-  if (frags.length > 20) {
-    const buckets = new Map<number, number>()
-    for (const f of frags) {
-      const k = Math.floor(f.x / 10)
-      buckets.set(k, (buckets.get(k) ?? 0) + 1)
-    }
-    const keys = [...buckets.keys()].sort((a, b) => a - b)
-    const threshold = Math.max(6, frags.length * 0.06)
-    let lastAnchor = -Infinity
-    for (const k of keys) {
-      const c = (buckets.get(k - 1) ?? 0) + (buckets.get(k) ?? 0) + (buckets.get(k + 1) ?? 0)
-      if (c >= threshold && k * 10 - lastAnchor >= 90) {
-        starts.push(k * 10 + 5)
-        lastAnchor = k * 10
-      }
-    }
-  }
-  const colIndexOf = (x: number): number => {
-    let k = 0
-    for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 6) k = i
-    return k
-  }
-
   const sorted = [...frags].sort((a, b) => b.y - a.y || a.x - b.x)
   const groups: Frag[][] = []
   let cur: Frag[] = []
@@ -225,6 +199,32 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
     }
   }
   if (cur.length) groups.push(cur)
+
+  // 组级列锚：只统计每条基线（组）的行首 x0——行内公式碎片不是行首，
+  // 不参与直方图，不会把列锚检测焊死（frag 级统计的缺陷）
+  const starts: number[] = []
+  {
+    const buckets = new Map<number, number>()
+    for (const g of groups) {
+      const x0 = Math.min(...g.map((f) => f.x))
+      const k = Math.floor(x0 / 10)
+      buckets.set(k, (buckets.get(k) ?? 0) + 1)
+    }
+    const threshold = Math.max(6, groups.length * 0.06)
+    let lastAnchor = -Infinity
+    for (const k of [...buckets.keys()].sort((a, b) => a - b)) {
+      const c = (buckets.get(k - 1) ?? 0) + (buckets.get(k) ?? 0) + (buckets.get(k + 1) ?? 0)
+      if (c >= threshold && k * 10 - lastAnchor >= 90) {
+        starts.push(k * 10 + 5)
+        lastAnchor = k * 10
+      }
+    }
+  }
+  const colIndexOf = (x: number): number => {
+    let k = 0
+    for (let i = 0; i < starts.length; i++) if (x >= starts[i] - 6) k = i
+    return k
+  }
 
   const lines: Line[] = []
   for (const g of groups) {
@@ -518,6 +518,14 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       : heading
         ? 'heading'
         : 'paragraph'
+
+    // 孤立公式编号行（"(1)"）：紧跟公式块的并入公式块
+    if (bufKind === 'formula' && bufT.length > 0 && /^\(\d{1,2}\)$/.test(l.text.trim())) {
+      bufT.push(l.text)
+      bufH.push(l.html)
+      bufLines.push(l)
+      continue
+    }
 
     // 拉丁连字符换行：同一个单词，直接拼进缓冲区末元素（join 时才不会多出空格）
     const lastT = bufT[bufT.length - 1] ?? ''

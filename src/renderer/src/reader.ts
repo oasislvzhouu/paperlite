@@ -526,7 +526,14 @@ async function upgradeFormulas(): Promise<void> {
         }
         const el = document.querySelector<HTMLElement>(`.formula[data-bi="${g.first}"]`)
         if (!el) continue
-        katex.render(latex, el, { displayMode: true, throwOnError: false })
+        // 先试渲染，成功才替换；失败保留原有 sub/sup 文本形式（不显示红色源码）
+        let html: string
+        try {
+          html = katex.renderToString(latex, { displayMode: true, throwOnError: true, strict: false })
+        } catch {
+          continue
+        }
+        el.innerHTML = html
         el.classList.add('katex-ok')
         el.setAttribute('title', `LaTeX: ${latex}`)
         for (const bi of g.els.slice(1)) {
