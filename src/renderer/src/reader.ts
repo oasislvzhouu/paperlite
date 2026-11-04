@@ -2,7 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
-import { extractReflowBlocks, cropPageImages, type ReflowBlock } from './reflow'
+import { extractReflowBlocks, extractReflowBlocksMupdf, cropPageImages, type MupdfPageLike, type ReflowBlock } from './reflow'
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
 import { recreatePdfWorker } from './worker-mgr'
 
@@ -147,13 +147,28 @@ export async function openReader(id: number): Promise<void> {
   $('#empty-tip').hidden = true
   $('#reader').hidden = false
 
-  // 解析重排（大文件可能要一两秒，给加载提示）
+  // 解析重排：MuPDF 原生行分组优先（行质量远高于 pdf.js 碎片文本），
+  // 失败时回退 pdf.js 文本管线；大文件解析给加载提示
   $('#reflow-loading').hidden = false
   try {
-    blocks = await extractReflowBlocks(doc)
-  } catch {
-    blocks = null
+    const res = await fetch(window.paperlite.pdfUrl(id))
+    const buf = new Uint8Array(await res.arrayBuffer())
+    const mupdf = await import('mupdf')
+    const mupdfDoc = mupdf.Document.openDocument(buf, 'application/pdf')
+    const mupdfPages: MupdfPageLike[] = []
+    for (let p = 0; p < mupdfDoc.countPages(); p++) {
+      mupdfPages.push(mupdfDoc.loadPage(p) as unknown as MupdfPageLike)
+    }
+    blocks = await extractReflowBlocksMupdf(mupdfPages)
+  } catch (err) {
+    console.warn('[paperlite] MuPDF 提取失败，回退 pdf.js 管线', err)
+    try {
+      blocks = await extractReflowBlocks(doc)
+    } catch {
+      blocks = null
+    }
   }
+  if (!blocks || blocks.length === 0) blocks = null
   $('#reflow-loading').hidden = true
 
   if (blocks && blocks.length > 0) {

@@ -391,7 +391,7 @@ function levelFor(size: number, bodySize: number): number {
 }
 
 /** 重复出现的页眉/页脚行：出现在多数页的页顶/页底短行 */
-function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): Line[][] {
+export function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): Line[][] {
   const pageCount = perPage.length
   if (pageCount < 3) return perPage.map((p) => p.lines)
 
@@ -439,7 +439,7 @@ function isSectionHeadingLine(l: Line): boolean {
 }
 
 /** 全文行间隙统计：返回最常见行间隙（近似排版行距） */
-function estimateLeading(lines: Line[], bodySize: number): number {
+export function estimateLeading(lines: Line[], bodySize: number): number {
   const buckets = new Map<number, number>()
   for (let i = 1; i < lines.length; i++) {
     const prev = lines[i - 1]
@@ -468,7 +468,7 @@ function estimateLeading(lines: Line[], bodySize: number): number {
 const LIST_ITEM_RE = /^\(?([0-9]{1,2}|[a-zA-Z])[).]\s+\S/
 
 /** 行流 → 语义块（标题/段落/公式/图片） */
-function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
+export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   // 自适应段距阈值：实际行距（众数）+ 30% 余量；下限 0.35×字号防过敏
   const paraGap = Math.max(bodySize * 0.35, estimateLeading(lines, bodySize) + bodySize * 0.3)
   const blocks: ReflowBlock[] = []
@@ -930,6 +930,73 @@ function structureFirstPage(blocks: ReflowBlock[]): void {
 }
 
 /** 主入口：整本 PDF → 重排语义块序列 */
+export interface MupdfPageLike {
+  toStructuredText: () => { asJSON: () => string }
+  getBounds: () => number[]
+}
+
+/** MuPDF 提取层：原生行分组（精确字形定位）→ Line[]，行质量远高于
+ *  pdf.js getTextContent 的碎片输出；下游管线（列锚/段落/标题/表注/
+ *  公式 KaTeX/图片裁剪）全部复用 */
+export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<ReflowBlock[]> {
+  const perPage: { lines: Line[]; height: number; width: number }[] = []
+  for (let p = 0; p < pages.length; p++) {
+    const stext = JSON.parse(pages[p].toStructuredText().asJSON())
+    const lines: Line[] = []
+    for (const block of stext.blocks) {
+      for (const l of block.lines ?? []) {
+        const text = (l.text ?? '').replace(/\s+/g, ' ').trim()
+        if (!text) continue
+        const bb = l.bbox
+        const words: string[] = text.split(/\s+/).filter(Boolean)
+        const shortWords = words.filter((w: string) => w.replace(/[^A-Za-z0-9\u4e00-\u9fff]/g, '').length <= 1).length
+        let mathChars = 0
+        for (const ch of text.replace(/\s/g, '')) {
+          if (/[\u2200-\u22FF\u2190-\u21FF\u2A00-\u2AFF\u{1D400}-\u{1D7FF}\u0370-\u03FF]/u.test(ch)) mathChars++
+        }
+        const chars = text.replace(/\s/g, '')
+        lines.push({
+          page: p + 1,
+          yTop: bb.y,
+          x0: bb.x,
+          x1: bb.x + bb.w,
+          fontSize: bb.h,
+          text,
+          html: text.replace(/[&<>"]/g, (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c])),
+          mathRatio: 0,
+          charMathRatio: chars.length ? mathChars / chars.length : 0,
+          shortFragRatio: words.length ? shortWords / words.length : 0,
+          fragCount: words.length,
+          eqNumbered: /\(\s*\d+\s*\)\s*$/.test(text)
+        })
+      }
+    }
+    const bounds = pages[p].getBounds()
+    perPage.push({ lines, height: bounds[3] - bounds[1], width: bounds[2] - bounds[0] })
+  }
+
+  const kept = dropRunningHeads(perPage)
+  const bodyLines = perPage.flatMap((p) => p.lines).filter((l) => !l.image)
+  const bodySize =
+    median(
+      bodyLines
+        .map((l) => l.fontSize)
+        .sort((a, b) => a - b)
+        .slice(0, Math.max(1, Math.floor(bodyLines.length / 2)))
+    ) || 10
+
+  const ordered: Line[] = []
+  perPage.forEach((p, i) => ordered.push(...orderLines(kept[i], p.width)))
+  detectTableZones(ordered, bodySize)
+  const blocks = linesToBlocks(ordered, bodySize)
+  structureFirstPage(blocks)
+  demoteFootnotes(blocks, bodySize)
+  mergeFormulaDebris(blocks, bodySize)
+  markFormulaContinuation(blocks)
+  markCaptions(blocks)
+  return blocks
+}
+
 export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
   for (let p = 1; p <= doc.numPages; p++) {
@@ -1124,7 +1191,7 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
 
 const TABLE_CAPTION_RE = /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
 
-function detectTableZones(lines: Line[], bodySize: number): void {
+export function detectTableZones(lines: Line[], bodySize: number): void {
   const isTableRow = (l: Line): boolean => {
     const t = l.text.replace(/\s/g, '')
     if (t.length <= 8) return true // 短单元格

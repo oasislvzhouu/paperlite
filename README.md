@@ -22,6 +22,10 @@ npm run fixtures     # 重新生成双栏测试 PDF（纯 Python，无依赖）
 npm run test:reflow  # Node 24 原生跑 TS 引擎：8 项断言（栏序/段落/页眉过滤/连字符…）
 ```
 
+## 许可
+
+本项目代码 MIT；依赖的开源组件含不同许可：pdf.js（Apache-2.0）、better-sqlite3（MIT）、**MuPDF（AGPL-3.0）**——用于重排文本层提取，个人使用与开源分发无碍，若闭源商业分发需遵守 AGPL 条款或购买 Artifex 商业许可。
+
 ## 架构
 
 ```
