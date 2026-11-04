@@ -530,7 +530,8 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       !l.eqNumbered &&
       (l.text.replace(/\s/g, '').length <= 12 ||
         (l.charMathRatio >= 0.12 && l.text.length <= 80))
-    // 公式块后的小字号行：display 公式的下标散件，无条件并入（字号是强证据）
+    // 公式块后的小字号行：display 公式的下标散件，无条件并入（字号是强证据）。
+    // 不进 bufLines——公式 rect 保持主体行范围，避免 LLM 裁图混入碎片段
     if (
       bufKind === 'formula' &&
       bufT.length > 0 &&
@@ -540,13 +541,11 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     ) {
       bufT.push(l.text)
       bufH.push(l.html)
-      bufLines.push(l)
       continue
     }
     if (tinyDebris && bufT.length > 0 && l.text.replace(/\s/g, '').length <= 12) {
       bufT.push(l.text)
       bufH.push(l.html)
-      bufLines.push(l)
       continue
     }
 

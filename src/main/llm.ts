@@ -94,6 +94,9 @@ export async function recognizeFormula(dataUrl: string): Promise<string> {
     .replace(/```(?:latex|tex)?/g, '')
     .replace(/^\$+|\$+$/g, '')
     .replace(/^\\\[|\\\]$/g, '')
+    // LLM 偶发把公式编号 / 无法识别字符（¿）带进输出
+    .replace(/\(\d{1,2}\)\s*$/, '')
+    .replace(/¿/g, '')
     .trim()
 }
 export async function translateParagraphs(
