@@ -97,6 +97,8 @@ export interface Line {
   image?: string
   /** 表格区域：该行为表注，附带整表渲染矩形（top-down pt） */
   tableZone?: { x0: number; x1: number; y0: number; y1: number }
+  /** 编号锚定的公式行（display 公式的碎片主体/编号行） */
+  eqCollect?: boolean
 }
 
 console.error(String.fromCharCode(77,65,82,75,69,82), "markCaptions@1160,mergeDebris@999,ver3-anchors");
@@ -569,13 +571,13 @@ function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    const heading =
-      !isFormulaLine(l) && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
-    const kind: 'heading' | 'paragraph' | 'formula' = isFormulaLine(l)
-      ? 'formula'
-      : heading
-        ? 'heading'
-        : 'paragraph'
+    const heading = !isFormulaLine(l) && !l.eqCollect && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
+    const kind: 'heading' | 'paragraph' | 'formula' =
+      l.eqCollect || isFormulaLine(l)
+        ? 'formula'
+        : heading
+          ? 'heading'
+          : 'paragraph'
 
     // 孤立公式编号行（"(1)"）：紧跟公式块的并入公式块
     if (bufKind === 'formula' && bufT.length > 0 && /^\(\d{1,2}\)$/.test(l.text.trim())) {
@@ -667,7 +669,9 @@ interface ImgRect {
 export function extractImageRects(
   fnArray: number[],
   argsArray: unknown[][],
-  opsConsts: { save: number; restore: number; transform: number; paintImageXObject: number; paintInlineImageXObject: number }
+  opsConsts: { save: number; restore: number; transform: number; paintImageXObject: number; paintInlineImageXObject: number },
+  pageW = 612,
+  pageH = 792
 ): ImgRect[] {
   const rects: ImgRect[] = []
   let ctm: number[] = [1, 0, 0, 1, 0, 0]
@@ -697,11 +701,19 @@ export function extractImageRects(
       const pts = [px(0, 0), px(1, 0), px(0, 1), px(1, 1)]
       const xs = pts.map((p) => p[0])
       const ys = pts.map((p) => p[1])
-      rects.push({
+      const rect = {
         x0: Math.min(...xs),
         y0: Math.min(...ys),
         x1: Math.max(...xs),
         y1: Math.max(...ys)
+      }
+      // clamp 到页面范围：越界放置的图片对象（如 y1 超出页高）会
+      // 污染聚类包围盒与裁剪区域，导致图表显示巨大且错乱
+      rects.push({
+        x0: Math.max(0, rect.x0),
+        y0: Math.max(0, rect.y0),
+        x1: Math.min(pageW, rect.x1),
+        y1: Math.min(pageH, rect.y1)
       })
     }
   }
@@ -765,7 +777,7 @@ export async function cropPageImages(
     return null
   })
   if (!opList) return []
-  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops)
+  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops, viewportW, viewportH)
   g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
   if (rects.length === 0) return []
 
@@ -979,6 +991,29 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
     }
     ordered.push(...ol)
   })
+  // 编号锚定的公式段收集：display 公式常被拆成主体行+编号行+散件行，
+  // 编号 (N) 是强锚点——从编号行向上回溯收集紧邻的数学行。
+  // IEEE 小型大写章节标题的编号（如 "1) xxx"）不匹配 (N) 模式，不受影响
+  for (let i = 0; i < ordered.length; i++) {
+    const l = ordered[i]
+    const trimmed = l.text.trim()
+    const standalone = /^\((\d{1,2})\)$/.test(trimmed)
+    const tail = trimmed.match(/^(.{0,70}?)\s*\((\d{1,2})\)\s*$/)
+    if (!standalone && !(tail && tail[1].length <= 70 && l.charMathRatio >= 0.04 && l.fragCount >= 2)) continue
+    l.eqCollect = true
+    // 向上回溯：收集紧邻的数学碎片行
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = ordered[j]
+      if (prev.page !== l.page) break
+      if (prev.eqCollect) continue
+      const gapOk = prev.yTop >= l.yTop - bodySize * 6 && prev.yTop <= l.yTop
+      if (!gapOk) break
+      const mathy = prev.mathRatio >= 0.25 || prev.charMathRatio >= 0.1 || (prev.shortFragRatio >= 0.5 && prev.fragCount >= 4)
+      if (!mathy) break
+      prev.eqCollect = true
+    }
+  }
+
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   structureFirstPage(blocks)
