@@ -124,6 +124,28 @@ async function generateThumb(id: number): Promise<void> {
   }
 }
 
+/** 应用启动后全局预翻译：依次扫描书架全部文章，补全缺失译文（限速错峰） */
+async function warmupAllTranslations(): Promise<void> {
+  try {
+    // 等 5 秒让首屏/缩略图先跑；每篇之间歇 2 秒，避免抢占交互
+    await new Promise((r) => setTimeout(r, 5000))
+    const list = await window.paperlite.listReadings()
+    for (const meta of list) {
+      // 用户正在手动翻译时让路（至多等 3 分钟）
+      let waited = 0
+      while (await window.paperlite.translatorBusy() && waited < 180000) {
+        await new Promise((r) => setTimeout(r, 5000))
+        waited += 5000
+      }
+      await prefetchTranslations(meta)
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    console.log('[paperlite] 全局预翻译扫描完成，共', list.length, '篇')
+  } catch (err) {
+    console.warn('[paperlite] 全局预翻译失败（忽略）', err)
+  }
+}
+
 /** 导入后后台预翻译：提取段落 → 主进程排队翻译并写入缓存库 */
 async function prefetchTranslations(meta: ReadingMeta): Promise<void> {
   try {
@@ -166,6 +188,8 @@ async function importFlow(): Promise<void> {
 }
 
 function init(): void {
+  // 启动即后台补全所有文章翻译
+  void warmupAllTranslations()
   // 全局翻译进度浮标（导入预翻译 + 手动翻译）
   const chip = () => document.querySelector('#trans-status') as HTMLElement
   const chipText = () => document.querySelector('#trans-status-text') as HTMLElement

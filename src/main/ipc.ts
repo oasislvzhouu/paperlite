@@ -125,18 +125,26 @@ export function registerIpc(): void {
     return true
   })
 
+  let interactiveTranslationInFlight = false
+  ipcMain.handle('translator:busy', () => interactiveTranslationInFlight)
+
   ipcMain.handle('llm:status', () => llmStatus())
 
   ipcMain.handle('translate:paragraphs', async (evt, texts: string[]): Promise<string[]> => {
     if (!Array.isArray(texts) || texts.length === 0) return []
     console.log(`[paperlite-main] 翻译请求：${texts.length} 段`)
-    return translateParagraphs(texts, (done, total) => {
-      try {
-        evt.sender.send('translation:progress', { done, total, kind: 'interactive' })
-      } catch {
-        /* 窗口可能已关闭 */
-      }
-    })
+    interactiveTranslationInFlight = true
+    try {
+      return await translateParagraphs(texts, (done, total) => {
+        try {
+          evt.sender.send('translation:progress', { done, total, kind: 'interactive' })
+        } catch {
+          /* 窗口可能已关闭 */
+        }
+      })
+    } finally {
+      interactiveTranslationInFlight = false
+    }
   })
 
   ipcMain.handle('formula:recognize', async (_e, dataUrl: string): Promise<string> => {
