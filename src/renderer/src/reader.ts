@@ -105,6 +105,7 @@ let blocks: ReflowBlock[] | null = null
 let mupdfBlocks: ReflowBlock[] | null = null
 let llmPageBlocks = new Map<number, ReflowBlock[]>()
 let mupdfDocRef: { loadPage: (n: number) => { toPixmap: (m: unknown, c: unknown) => { asPNG: () => Uint8Array } } } | null = null
+let mupdfModuleRef: typeof import('mupdf') | null = null
 let llmParsing = new Set<number>()
 let reflowFont = 17
 
@@ -119,6 +120,7 @@ function escapeHtml(s: string): string {
 }
 
 export async function openReader(id: number): Promise<void> {
+  console.error("[TRACE-V2] openReader 进入，MuPDF 架构版本")
   const info = await window.paperlite.openReading(id)
   if (!info) return
   await task?.destroy()
@@ -160,8 +162,7 @@ export async function openReader(id: number): Promise<void> {
   try {
     const res = await fetch(window.paperlite.pdfUrl(id))
     const buf = new Uint8Array(await res.arrayBuffer())
-    const mupdf = await import('mupdf')
-    const mupdfDoc = mupdf.Document.openDocument(buf, 'application/pdf')
+    const mupdfDoc = mupdfModuleRef!.Document.openDocument(buf, 'application/pdf')
     mupdfDocRef = mupdfDoc as unknown as typeof mupdfDocRef
     const mupdfPages: MupdfPageLike[] = []
     for (let p = 0; p < mupdfDoc.countPages(); p++) {
@@ -176,6 +177,7 @@ export async function openReader(id: number): Promise<void> {
       blocks = null
     }
   }
+  mupdfBlocks = blocks
   if (!blocks || blocks.length === 0) blocks = null
   $('#reflow-loading').hidden = true
 
@@ -468,13 +470,10 @@ async function attachTables(): Promise<void> {
 let pageParseSeq = 0
 
 async function renderPageToDataUrl(p: number): Promise<string | null> {
-  if (!mupdfDocRef) return null
+  if (!mupdfDocRef || !mupdfModuleRef) return null
   try {
     const page = mupdfDocRef.loadPage(p - 1)
-    const pixmap = page.toPixmap(
-      { a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 },
-      { name: 'DeviceRGB', n: 3 }
-    )
+    const pixmap = page.toPixmap(mupdfModuleRef.Matrix.scale(2, 2), mupdfModuleRef.ColorSpace.DeviceRGB)
     const png = pixmap.asPNG()
     let binary = ''
     for (let i = 0; i < png.length; i += 8192) {
