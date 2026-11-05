@@ -656,6 +656,22 @@ body.reflow-mode .zoomer { display: none; }
   border-radius: 8px;
   background: #fff;
 }
+/* 算法框原子块（对标 no-reflow-code-i）：表题保持原文大小写（"Algorithm 1"），
+ * 伪代码体裁图带浅底衬，视觉上区别于数据表 */
+#reflow-article figure.table.algorithm figcaption { text-transform: none; }
+#reflow-article figure.table.algorithm img {
+  border: 1px solid var(--line);
+  background: #fafafa;
+}
+
+/* 参考文献条目（对标 pdf_reference_content）：缩小弱化、不翻译 */
+#reflow-article p.ref-entry {
+  font-size: 0.82em;
+  color: var(--muted);
+  margin: 0.3em 0;
+  text-align: left;
+  hyphens: auto;
+}
 
 /* 公式保真裁图（原版面渲染，对标 no-reflow-formula） */
 #reflow-article .formula.formula-fidelity {

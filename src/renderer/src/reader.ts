@@ -216,13 +216,14 @@ export async function openReader(id: number): Promise<void> {
     window.setTimeout(() => {
       if (readingId === id && mode === 'reflow') void renderFormulasAsImages()
     }, 600)
-    // render 恢复窗口：图片与公式管线各自独立探测恢复（平台级泄洪期可达分钟级）
+    // 表格原子块（MuPDF 裁图）与公式同源，紧跟其后（不依赖 pdf.js render 状态）
+    window.setTimeout(() => {
+      if (readingId === id && mode === 'reflow') void attachTables()
+    }, 1000)
+    // render 恢复窗口：图片管线独立探测恢复（平台级泄洪期可达分钟级）
     window.setTimeout(() => {
       if (readingId === id && mode === 'reflow') void attachImages()
     }, 8000)
-    window.setTimeout(() => {
-      if (readingId === id && mode === 'reflow') void attachTables()
-    }, 9000)
     // 旧逐公式 LLM 路径已由 parseAllPages（整页批量）取代，不再调度——
     // 两条路径都会改写 .formula 内容，并行会产生污染叠加
   } else {
@@ -274,8 +275,9 @@ function renderReflow(): void {
         .join('')
       parts.push(`<figure class="figure" data-bi="${bi}">${imgs}</figure>`)
     } else if (b.kind === 'table') {
+      const algoCls = b.role === 'algorithm' ? ' algorithm' : ''
       parts.push(
-        `<figure class="figure table" data-bi="${bi}"><figcaption>${body}</figcaption></figure>`
+        `<figure class="figure table${algoCls}" data-bi="${bi}"><figcaption>${body}</figcaption></figure>`
       )
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
@@ -436,38 +438,28 @@ async function attachImages(): Promise<void> {
   }
 }
 
-/** 表格块渲染：整块矩形裁图（含转曲矢量表格） */
+/** 表格块渲染：MuPDF 整块矩形裁图（含转曲矢量表格）
+ * 对标 Scholaread no-reflow-table 原子块：不走 pdf.js render（其会话级死亡时表格全灭），
+ * 与公式管线共用 MuPDF 3× 页面画布缓存（同页公式已渲染则零额外开销）。 */
 async function attachTables(): Promise<void> {
-  if (!blocks || !doc || mode !== 'reflow') return
-  await probeRenderReady()
+  if (!blocks || mode !== 'reflow') return
   for (const b of blocks) {
     if (b.kind !== 'table' || !b.rect || readingId === 0) continue
     try {
-      const fig = document.querySelector<HTMLElement>(`figure.table[data-bi]`)
       const target = document.querySelector(`figure.table[data-bi="${blocks.indexOf(b)}"]`)
       if (!target || target.querySelector('img')) continue
-      const page = await doc.getPage(b.page)
-      const vp = page.getViewport({ scale: 1 })
-      const scale = Math.min(3, 2000 / vp.width)
-      const viewport = page.getViewport({ scale })
-      const canvas = document.createElement('canvas')
-      canvas.width = Math.floor(viewport.width)
-      canvas.height = Math.floor(viewport.height)
-      const cx = canvas.getContext('2d')
-      if (!cx) continue
-      await Promise.race([
-        page.render({ canvasContext: cx, viewport }).promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('table-render-timeout')), 6000))
-      ])
-      const pad = 3
-      const x = Math.max(0, (b.rect.x0 - pad) * scale)
-      const y = Math.max(0, (b.rect.y0 - pad) * scale)
-      const w = Math.min(canvas.width - x, (b.rect.x1 - b.rect.x0 + pad * 2) * scale)
-      const h = Math.min(canvas.height - y, (b.rect.y1 - b.rect.y0 + pad * 2) * scale)
+      const canvas = await getPageCanvasMupdf(b.page, 3)
+      if (!canvas) continue
+      const scale = 3
+      const pad = 4
+      const x = Math.max(0, Math.floor((b.rect.x0 - pad) * scale))
+      const y = Math.max(0, Math.floor((b.rect.y0 - pad) * scale))
+      const w = Math.min(canvas.width - x, Math.ceil((b.rect.x1 - b.rect.x0 + pad * 2) * scale))
+      const h = Math.min(canvas.height - y, Math.ceil((b.rect.y1 - b.rect.y0 + pad * 2) * scale))
       if (w < 20 || h < 20) continue
       const out = document.createElement('canvas')
-      out.width = Math.floor(w)
-      out.height = Math.floor(h)
+      out.width = w
+      out.height = h
       const octx = out.getContext('2d')
       if (!octx) continue
       octx.fillStyle = '#fff'
@@ -477,7 +469,6 @@ async function attachTables(): Promise<void> {
       img.src = out.toDataURL('image/jpeg', 0.92)
       img.style.maxWidth = '100%'
       target.appendChild(img)
-      void fig
     } catch {
       /* 单表失败跳过 */
     }
@@ -880,7 +871,8 @@ function paragraphIndexes(): Array<{ bi: number; text: string }> {
   if (!blocks) return []
   return blocks
     .map((b, bi) => ({ b, bi }))
-    .filter((x) => x.b.kind === 'paragraph')
+    // 参考文献条目不译（对标 no_trans）：引用串翻译无意义且烧配额
+    .filter((x) => x.b.kind === 'paragraph' && x.b.role !== 'ref-entry')
     .map((x) => ({ bi: x.bi, text: x.b.text }))
 }
 

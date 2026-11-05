@@ -29,8 +29,19 @@ export interface ReflowBlock {
   top?: number
   /** 首行字号（脚注检测用） */
   firstFontSize?: number
-  /** 元数据角色：首页结构化 + 全文图注 */
-  role?: 'title' | 'authors' | 'affiliation' | 'abstract' | 'keywords' | 'meta' | 'caption' | 'list-item' | 'para-cont'
+  /** 元数据角色：首页结构化 + 全文图注 + 算法框原子块 + 参考文献条目 */
+  role?:
+    | 'title'
+    | 'authors'
+    | 'affiliation'
+    | 'abstract'
+    | 'keywords'
+    | 'meta'
+    | 'caption'
+    | 'list-item'
+    | 'para-cont'
+    | 'algorithm'
+    | 'ref-entry'
 }
 
 interface RawTextItem {
@@ -99,6 +110,10 @@ export interface Line {
   image?: string
   /** 表格区域：该行为表注，附带整表渲染矩形（top-down pt） */
   tableZone?: { x0: number; x1: number; y0: number; y1: number }
+  /** tableZone 实为算法框（"Algorithm N" + 伪代码体）→ 块 role=algorithm */
+  tableAlgo?: boolean
+  /** 参考文献标题行（居中排版偏离栏锚会被排到栏尾）→ 强制起新块 */
+  isRefStart?: boolean
   /** 编号锚定的公式行（display 公式的碎片主体/编号行） */
   eqCollect?: boolean
   /** 编号行的公式区（整栏宽 × 上下正文行之间），KaTeX 裁图用 */
@@ -573,10 +588,13 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
+    if (l.isRefStart) flush() // REFERENCES 标题强制起新块（防并入前段尾部）
+
     if (l.tableZone) {
       flush()
       blocks.push({
         kind: 'table',
+        role: l.tableAlgo ? 'algorithm' : undefined,
         page: l.page,
         text: l.text.replace(/\s+/g, ' ').trim(),
         rect: l.tableZone,
@@ -675,7 +693,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       prev.kind === 'paragraph' &&
       b.page === prev.page &&
       words <= 4 &&
-      !/^\d+\)/.test(b.text)
+      !/^\d+\)/.test(b.text) &&
+      // REFERENCES 标题块（1 词）不能并回前段——参考文献区的起点标记
+      !REFERENCES_HEADING_RE.test(b.text.trim())
     ) {
       prev.text = `${prev.text} ${b.text}`.replace(/\s+/g, ' ')
       prev.html = `${prev.html ?? prev.text} ${b.html ?? b.text}`
@@ -1026,7 +1046,9 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
 
   const ordered: Line[] = []
   perPage.forEach((p, i) => ordered.push(...orderLines(kept[i], p.width)))
+  reorderReferenceHeading(ordered)
   detectTableZones(ordered, bodySize)
+  detectAlgorithms(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   mergeFormulaClusters(blocks, bodySize)
   mergeOrphanFragments(blocks)
@@ -1035,6 +1057,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  markReferences(blocks)
   return blocks
 }
 
@@ -1187,7 +1210,9 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
     l.eqZone = zone
   }
 
+  reorderReferenceHeading(ordered)
   detectTableZones(ordered, bodySize)
+  detectAlgorithms(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   mergeFormulaClusters(blocks, bodySize)
   mergeOrphanFragments(blocks)
@@ -1196,6 +1221,7 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  markReferences(blocks)
   return blocks
 }
 
@@ -1339,6 +1365,8 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
       !b.role &&
       a.page === b.page &&
       !/[.!?;:）)"']$/.test(a.text.trim()) &&
+      // REFERENCES 标题是全大写，会被 all-caps 续行分支误并入前段尾部
+      !REFERENCES_HEADING_RE.test(b.text.trim()) &&
       (/^[a-z(]/.test(b.text.trim()) || /^[A-Z]{2,}/.test(b.text.trim()))
     ) {
       a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ')
@@ -1363,28 +1391,56 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
   }
   const isProse = (l: Line): boolean =>
     l.text.length > 60 && l.fragCount <= 2 && !TABLE_CAPTION_RE.test(l.text)
+  /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体。
+   *  doi/卷期页码行会被"数字/斜杠数据行"判据误收，必须显式排除 */
+  const isRefEntry = (l: Line): boolean =>
+    /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)\b/i.test(l.text.trim())
 
   for (let i = 0; i < lines.length; i++) {
     const cap = lines[i]
     if (!cap.tableZone && !TABLE_CAPTION_RE.test(cap.text.trim())) continue
     if (cap.text.trim().length > 130) continue
-    // 收集表注之后同页、yTop 递增的表格体行
+    // 行内散文提及 "Table V reports the 95% CI of…"：编号后紧跟小写词
+    // （动词/介词）的是句中提及；真表注编号后是大写标题词或空（"TABLE II"）
+    const afterNum = cap.text.trim().replace(TABLE_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
+    if (/^[a-z]/.test(afterNum)) continue
+    // IEEE 算法浮动体："TABLE N" 表注正下方是 "ALGORITHM M" —— 整个
+    // 浮动体是伪代码框，交给 detectAlgorithms 原子化（转曲兜底也跳过，
+    // 否则会裁出半页误图）
+    const nextLine = lines[i + 1]
+    if (
+      nextLine &&
+      nextLine.page === cap.page &&
+      !nextLine.tableZone &&
+      nextLine.yTop > cap.yTop &&
+      ALGO_CAPTION_RE.test(nextLine.text.trim())
+    ) {
+      continue
+    }
+    // 收集表注之后同页、yTop 递增、同栏的表格体行
     const rows: Line[] = []
     let j = i + 1
     for (; j < lines.length; j++) {
       const l = lines[j]
       if (l.page !== cap.page) break
       if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）→ 表格不会跨栏
+      // 同栏约束：表体行必须与表注有横向重叠（跨栏溢出会把下一栏的
+      // 文献条目/短行整片吞进来）
+      if (l.x1 < cap.x0 - 40 || l.x0 > cap.x1 + 40) break
+      if (isRefEntry(l)) break // 文献条目/REFERENCES 标题即断
       if (isProse(l)) break
       if (!isTableRow(l)) break
       rows.push(l)
     }
     if (rows.length < 2) {
-      // 兜底：表格体为转曲矢量（无文本层无图片对象）→ 表注到页底整块渲染
+      // 兜底：表格体为转曲矢量（无文本层无图片对象）→ 表注到页底整块渲染。
+      // 栏感知：表注明确在单栏内时只裁该栏（US Letter 612pt 双栏中线 ~306）
       const pageH = 792
+      const colX0 = cap.x0 >= 306 ? 306 : 20
+      const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
       cap.tableZone = {
-        x0: 20,
-        x1: 592,
+        x0: colX0,
+        x1: colX1,
         y0: cap.yTop - 2,
         y1: pageH - 26
       }
@@ -1407,6 +1463,109 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 2
     }
     lines.splice(i + 1, rows.length)
+  }
+}
+
+/* ── 算法框原子化（对标 Scholaread no-reflow-code-i）：
+ *    "Algorithm N" 表题 + 伪代码体（编号步骤/Input/Output/数学行）整体
+ *    裁图渲染。伪代码的缩进层级与符号排版无法文本重建，线性化只会得到
+ *    乱序残句；原子块是唯一保真解 ── */
+
+const ALGO_CAPTION_RE = /^\s*algorithm\s*(?:\d{1,3}|[IVXLC]{1,6})\s*[:.·\-—–]?\s*/i
+
+function isAlgoBodyLine(l: Line): boolean {
+  const t = l.text.trim()
+  if (!t || t.length > 95) return false
+  if (ALGO_CAPTION_RE.test(t)) return false // 下一个算法框
+  if (CAPTION_RE.test(t) || TABLE_CAPTION_RE.test(t)) return false // 图/表注
+  if (/^\s*\d{1,2}\s*[:.)\-]/.test(t)) return true // 编号步骤 "1:" "2)"
+  if (
+    /^(input|output|requires?|ensures?|given|initialize[ds]?|procedure|return|repeat|while|until|end)\b/i.test(
+      t
+    ) &&
+    t.length < 70
+  )
+    return true
+  if (/[=←→⊕∘∇]/.test(t) || /[\u0370-\u03FF]/.test(t)) return true
+  if (l.charMathRatio >= 0.1) return true
+  return l.fragCount >= 3 && t.length < 60
+}
+
+export function detectAlgorithms(lines: Line[], bodySize: number): void {
+  for (let i = 0; i < lines.length; i++) {
+    const cap = lines[i]
+    if (cap.tableZone || cap.eqCollect) continue
+    if (!ALGO_CAPTION_RE.test(cap.text.trim())) continue
+    if (cap.text.trim().length > 100) continue
+    // 行内散文提及 "Algorithm 1 shows that…"：编号后紧跟小写词即拒绝
+    const afterNum = cap.text.trim().replace(ALGO_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
+    if (/^[a-z]/.test(afterNum)) continue
+    // 收集表题之后同页、yTop 递增的伪代码体行
+    const rows: Line[] = []
+    let j = i + 1
+    for (; j < lines.length; j++) {
+      const l = lines[j]
+      if (l.page !== cap.page) break
+      if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）
+      if (rows.length > 0 && l.yTop - rows[rows.length - 1].yTop > bodySize * 3) break // 框级空隙
+      if (!isAlgoBodyLine(l)) break
+      if (l.yTop + (l.fontSize || 8) - cap.yTop > 300) break // 高度上限
+      rows.push(l)
+    }
+    // 有效性：≥2 行伪代码才原子化。散文提到 "Algorithm 1 shows…" 的
+    // 下文是普通段落，rows 必然不足 → 自动免疫
+    // 矢量兜底：伪代码体转曲（无文本层）时 rows 为空，但表题下方同栏
+    // 会出现 ≥4 行正文高度的文本空隙 —— 空隙区即伪代码框，裁图到下一
+    // 条文本行上沿为止
+    if (rows.length < 2) {
+      let below: Line | null = null
+      for (let k = i + 1; k < lines.length; k++) {
+        const x = lines[k]
+        if (x.page !== cap.page) break
+        if (x.yTop <= cap.yTop) continue
+        if (x.x1 < cap.x0 - 40 || x.x0 > cap.x1 + 40) continue // 异栏行不算
+        below = x
+        break
+      }
+      const gap = below ? below.yTop - (cap.yTop + Math.max(cap.fontSize, 6)) : 0
+      if (!below || gap < bodySize * 4) continue
+      const colX0 = cap.x0 >= 306 ? 306 : cap.x1 <= 306 ? 20 : 20
+      const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
+      const prevV = lines[i - 1]
+      const prevTbl =
+        prevV &&
+        prevV.page === cap.page &&
+        !prevV.tableZone &&
+        TABLE_CAPTION_RE.test(prevV.text.trim()) &&
+        cap.yTop - (prevV.yTop + Math.max(prevV.fontSize, 6)) < bodySize * 1.5
+      cap.tableZone = {
+        x0: prevTbl ? Math.min(colX0, prevV.x0) - 2 : colX0,
+        x1: colX1,
+        y0: (prevTbl ? prevV.yTop : cap.yTop) - 2,
+        y1: below.yTop - 2
+      }
+      cap.tableAlgo = true
+      if (prevTbl) lines.splice(i - 1, 1)
+      continue
+    }
+    const all = [cap, ...rows]
+    // IEEE 风格：表注 "TABLE N" 紧贴算法标题上方 → 一并纳入裁图区并移除
+    const prev = lines[i - 1]
+    const prevIsTblCap =
+      prev &&
+      prev.page === cap.page &&
+      !prev.tableZone &&
+      TABLE_CAPTION_RE.test(prev.text.trim()) &&
+      cap.yTop - (prev.yTop + Math.max(prev.fontSize, 6)) < bodySize * 1.5
+    if (prevIsTblCap) all.unshift(prev)
+    cap.tableZone = {
+      x0: Math.min(...all.map((l) => l.x0)) - 2,
+      x1: Math.max(...all.map((l) => l.x1)) + 2,
+      y0: Math.min(...all.map((l) => l.yTop)) - 2,
+      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 2
+    }
+    cap.tableAlgo = true
+    lines.splice(prevIsTblCap ? i - 1 : i + 1, rows.length + (prevIsTblCap ? 1 : 0))
   }
 }
 
@@ -1441,5 +1600,71 @@ function markCaptions(blocks: ReflowBlock[]): void {
       hits++
     } else if (m && (b.kind !== 'paragraph' || b.role)) {
     }
+  }
+}
+
+/* ── 参考文献区（对标 Scholaread pdf_reference_content / no_trans）：
+ *    References 标题之后的条目段打 ref-entry 角色——条目串（作者列表 +
+ *    期刊卷期页码 + DOI）文本重建本就残缺，送 LLM 翻译只产出垃圾且
+ *    烧配额；排版上缩小字号弱化视觉权重。遇附录/致谢标题即止。
+ *    实测标题常与首条目合并为一段（"REFERENCES [1] D. Xiaobing…"），
+ *    段首匹配 + 含 "[1]" 即认定 ── */
+
+const REFERENCES_HEADING_RE = /^\s*(references?|bibliography|参考文献|文献)\s*$/i
+const REFERENCES_START_RE = /^(references?|bibliography|参考文献)\b/i
+const REFS_END_HEADING_RE = /^\s*(appendix|appendices|supplementary|acknowledge?ments?|附录|致谢)\b/i
+
+/** 参考文献标题回位：居中排版的 REFERENCES（x0 偏离栏锚）会被列锚评分
+ *  排到栏尾，落进文献条目流中间。移回几何位置——同栏、yTop 在其下方的
+ *  第一条文本行之前；并打 isRefStart 标记让 linesToBlocks 强制起新块。 */
+export function reorderReferenceHeading(lines: Line[]): void {
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    if (!REFERENCES_HEADING_RE.test(l.text.trim())) continue
+    if (l.text.trim().length > 20) continue
+    l.isRefStart = true
+    // 几何上的下一条同栏行（文献首条目）
+    let target = -1
+    for (let j = 0; j < lines.length; j++) {
+      const x = lines[j]
+      if (j === i || x.page !== l.page) continue
+      if (x.yTop <= l.yTop) continue
+      if (x.x1 < l.x0 - 40 || x.x0 > l.x1 + 40) continue // 异栏行不算
+      if (target === -1 || x.yTop < lines[target].yTop) target = j
+    }
+    if (target > -1 && target < i) {
+      lines.splice(i, 1)
+      lines.splice(target, 0, l)
+    }
+  }
+}
+
+export function markReferences(blocks: ReflowBlock[]): void {
+  let inRefs = false
+  for (const b of blocks) {
+    const t = b.text.trim()
+    if (!inRefs) {
+      // 触发形态①：标题独立成块（heading 或 fs=正文的短行 paragraph）
+      if ((b.kind === 'heading' || b.kind === 'paragraph') && REFERENCES_HEADING_RE.test(t)) {
+        inRefs = true
+        continue
+      }
+      // 触发形态②：标题与首条目合并为一段（"REFERENCES [1] D. Xiaobing…"
+      // 或 tiny-skip 丢掉 [N] 标记后的 "REFERENCES S. Lu, J. Lu…"——
+      // 靠条目内的期刊标记（引号/卷期/页码）认定，散文 "References are
+      // listed…" 无这些标记天然免疫）
+      if (
+        b.kind === 'paragraph' &&
+        !b.role &&
+        REFERENCES_START_RE.test(t) &&
+        /["“]|\[\s*\d|vol\.|pp\.|doi:/i.test(t)
+      ) {
+        inRefs = true
+        b.role = 'ref-entry'
+      }
+      continue
+    }
+    if (b.kind === 'heading' && REFS_END_HEADING_RE.test(t)) break
+    if (b.kind === 'paragraph' && (!b.role || b.role === 'list-item')) b.role = 'ref-entry'
   }
 }
