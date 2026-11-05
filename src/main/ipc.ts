@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { copyFile, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { getDb, libraryDir, thumbPath } from './db'
-import { llmStatus, parsePageStructured, recognizeFormula, translateParagraphs } from './llm'
+import { llmStatus, parsePageFormulas, recognizeFormula, translateParagraphs } from './llm'
 import type { ImportResult, OpenReadingResult, ReadingMeta } from '../shared/types'
 
 const isPdf = (name: string): boolean => /\.pdf$/i.test(name)
@@ -172,8 +172,8 @@ export function registerIpc(): void {
   ipcMain.handle(
     'pageparse:parse',
     async (_e, dataUrl: string): Promise<string> => {
-      const blocks = await parsePageStructured(dataUrl)
-      return JSON.stringify(blocks)
+      const list = await parsePageFormulas(dataUrl)
+      return JSON.stringify(list)
     }
   )
 

@@ -101,7 +101,7 @@ export async function parsePageStructured(dataUrl: string): Promise<ParsedBlock[
     },
     body: JSON.stringify({
       model: llm.model,
-      max_tokens: 8192,
+      max_tokens: 16000,
       thinking: { type: 'disabled' },
       messages: [
         {
@@ -127,6 +127,61 @@ export async function parsePageStructured(dataUrl: string): Promise<ParsedBlock[
   return parsed.blocks.filter(
     (b) => b && typeof b.type === 'string' && (typeof b.text === 'string' || typeof b.latex === 'string')
   )
+}
+
+/** 整页公式批量提取：页面图 → 按出现顺序的 LaTeX 数组 */
+export async function parsePageFormulas(dataUrl: string): Promise<string[]> {
+  const mm = /^data:image\/(png|jpeg);base64,(.+)$/.exec(dataUrl)
+  if (!mm) throw new Error('页面图片格式不支持')
+  const { llm } = loadSettings()
+  if (!llm.apiKey) throw new Error('未配置 API Key')
+  const mediaType = mm[1] === 'png' ? 'image/png' : 'image/jpeg'
+  const res = await fetch(`${llm.baseUrl.replace(/\/$/, '')}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': llm.apiKey,
+      authorization: `Bearer ${llm.apiKey}`,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: llm.model,
+      max_tokens: 8192,
+      thinking: { type: 'disabled' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: mm[2] } },
+            {
+              type: 'text',
+              text:
+                '这是论文页面图片。找出页面中所有独立成行的 display 数学公式（通常带编号 (1) (2)...，' +
+                '不含正文行内符号），按出现顺序把每个公式转写为 LaTeX。' +
+                '只输出 JSON 数组：["公式1的LaTeX", "公式2的LaTeX", ...]，' +
+                '每个元素是一条完整公式（多行公式合并为一条），不含编号 (N)，不要解释。' +
+                '若页面没有 display 公式，输出 []。忽略公式周边的英文正文文字。'
+            }
+          ]
+        }
+      ]
+    }),
+    signal: AbortSignal.timeout(180_000)
+  })
+  const data = (await res.json()) as AnthropicResponse
+  if (!res.ok || data.error) throw new Error(`LLM ${res.status}: ${data.error?.message ?? res.statusText}`)
+  const raw = (data.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('')
+  const jsonText = raw.replace(/```(?:json)?/g, '')
+  const start = jsonText.indexOf('[')
+  const end = jsonText.lastIndexOf(']')
+  if (start === -1 || end === -1) return []
+  try {
+    const arr = JSON.parse(jsonText.slice(start, end + 1))
+    if (!Array.isArray(arr)) return []
+    return arr.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim())
+  } catch {
+    return []
+  }
 }
 
 /** 公式图片 → LaTeX（视觉识别） */
