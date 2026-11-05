@@ -4,7 +4,6 @@ import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { extractReflowBlocks, extractReflowBlocksMupdf, cropPageImages, type MupdfPageLike, type ReflowBlock } from './reflow'
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
-import * as mupdf from 'mupdf'
 import { recreatePdfWorker } from './worker-mgr'
 import { isPollutedLatex } from './llm-shared'
 
@@ -108,6 +107,13 @@ let llmPageBlocks = new Map<number, ReflowBlock[]>()
 let mupdfDocRef: { loadPage: (n: number) => { toPixmap: (m: unknown, c: unknown) => { asPNG: () => Uint8Array } } } | null = null
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let mupdfModuleRef: any = null
+/** MuPDF 模块：动态导入包装模块（独立 chunk，避免顶层 await 阻塞主图） */
+async function loadMupdf(): Promise<any> {
+  if (mupdfModuleRef) return mupdfModuleRef
+  const mod = await import('./mupdf-loader')
+  mupdfModuleRef = mod.default
+  return mupdfModuleRef
+}
 let llmParsing = new Set<number>()
 
 
@@ -476,10 +482,12 @@ async function attachTables(): Promise<void> {
 let pageParseSeq = 0
 
 async function renderPageToDataUrl(p: number): Promise<string | null> {
-  if (!mupdfDocRef || !mupdfModuleRef) return null
+  if (!mupdfDocRef) return null
+  const m = await loadMupdf().catch(() => null)
+  if (!m) return null
   try {
     const page = mupdfDocRef.loadPage(p - 1)
-    const pixmap = page.toPixmap(mupdfModuleRef.Matrix.scale(2, 2), mupdfModuleRef.ColorSpace.DeviceRGB)
+    const pixmap = page.toPixmap(m.Matrix.scale(2, 2), m.ColorSpace.DeviceRGB)
     const png = pixmap.asPNG()
     let binary = ''
     for (let i = 0; i < png.length; i += 8192) {
@@ -572,6 +580,9 @@ async function parseAllPages(): Promise<void> {
           const latex = latexList[n]
           n++
           if (!latex) continue
+          // 污染检测：LLM 把周边正文（≥3 个 4 字母英文词）写进 LaTeX → 跳过该条，
+          // 保留块原有文本形式（宁朴素不错乱）
+          if (isPollutedLatex(latex)) continue
           b.latex = latex
           b.text = latex
           let html: string
