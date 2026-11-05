@@ -9,4 +9,5 @@
  */
 import * as mupdf from 'mupdf'
 
+export { mupdf }
 export default mupdf

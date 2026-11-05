@@ -110,9 +110,14 @@ let mupdfModuleRef: any = null
 /** MuPDF 模块：动态导入包装模块（独立 chunk，避免顶层 await 阻塞主图） */
 async function loadMupdf(): Promise<any> {
   if (mupdfModuleRef) return mupdfModuleRef
-  const mod = await import('./mupdf-loader')
-  mupdfModuleRef = mod.default
-  return mupdfModuleRef
+  const mod: any = await import('./mupdf-loader')
+  const m = mod.mupdf ?? mod.default ?? mod
+  if (!m || typeof m.Document?.openDocument !== 'function') {
+    const keys = Object.keys(mod ?? {}).join(',')
+    throw new Error(`mupdf-loader 未导出可用模块（keys: ${keys}）`)
+  }
+  mupdfModuleRef = m
+  return m
 }
 let llmParsing = new Set<number>()
 
@@ -130,7 +135,6 @@ function escapeHtml(s: string): string {
 }
 
 export async function openReader(id: number): Promise<void> {
-  console.error("[TRACE-V2] openReader 进入，MuPDF 架构版本")
   const info = await window.paperlite.openReading(id)
   if (!info) return
   await task?.destroy()
@@ -172,7 +176,8 @@ export async function openReader(id: number): Promise<void> {
   try {
     const res = await fetch(window.paperlite.pdfUrl(id))
     const buf = new Uint8Array(await res.arrayBuffer())
-    const mupdfDoc = mupdfModuleRef!.Document.openDocument(buf, 'application/pdf')
+    const mupdfMod = await loadMupdf()
+    const mupdfDoc = mupdfMod.Document.openDocument(buf, 'application/pdf')
     mupdfDocRef = mupdfDoc as unknown as NonNullable<typeof mupdfDocRef>
     const mupdfPages: MupdfPageLike[] = []
     for (let p = 0; p < mupdfDoc.countPages(); p++) {
@@ -215,9 +220,8 @@ export async function openReader(id: number): Promise<void> {
     window.setTimeout(() => {
       if (readingId === id && mode === 'reflow') void attachTables()
     }, 9000)
-    window.setTimeout(() => {
-      if (readingId === id && mode === 'reflow') void upgradeFormulas()
-    }, 12000)
+    // 旧逐公式 LLM 路径已由 parseAllPages（整页批量）取代，不再调度——
+    // 两条路径都会改写 .formula 内容，并行会产生污染叠加
   } else {
     applyWidth()
     pdfScrollBuilt = false

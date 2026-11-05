@@ -418,8 +418,20 @@ export function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): 
 }
 
 /** 行是公式吗：字体占比 / 符号密度 / 公式编号 / 逐符号碎片结构，任一强信号即判定 */
+/** 数学函数/记号名（不算"英文散文词"） */
+const MATH_WORD_RE =
+  /^(sigma|tanh|exp|max|min|log|arg|sample|softmax|sigmoid|relu|concat|softplus|where|and|then|follows|respectively)$/i
+
 function isFormulaLine(l: Line): boolean {
   if (l.text.replace(/\s/g, '').length < 1) return false
+  const t = l.text.trim()
+  // 强信号 1：行尾公式编号 (N) 且散文词≤1 —— display 公式的特征
+  const proseWords = (t.match(/[A-Za-z]{4,}/g) ?? []).filter((w) => !MATH_WORD_RE.test(w))
+  const hasEqNum = /\(\d{1,2}\)\s*$/.test(t)
+  if (hasEqNum && proseWords.length <= 1) return true
+  // 强信号 2：含等号、短行、几乎无散文词 —— 纯表达式行
+  const eqCount = (t.match(/=/g) ?? []).length
+  if (eqCount >= 1 && t.length <= 90 && proseWords.length <= 1) return true
   // 算法伪代码的输入/变量声明（如 "Budget, θ, θ−, ER memory"）：
   // 含 2 个以上长英文单词 → 是名词列表不是公式
   const longWords = l.text.match(/[A-Za-z]{4,}/g) ?? []
@@ -583,7 +595,8 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           ? 'heading'
           : 'paragraph'
 
-    // 孤立公式编号行（"(1)"）：紧跟公式块的并入公式块
+    // 孤立公式编号行（"(1)"）：紧跟公式块或编号行的并入前块
+
     if (bufKind === 'formula' && bufT.length > 0 && /^\(\d{1,2}\)$/.test(l.text.trim())) {
       bufT.push(l.text)
       bufH.push(l.html)
@@ -1372,7 +1385,6 @@ function markCaptions(blocks: ReflowBlock[]): void {
       b.role = 'caption'
       hits++
     } else if (m && (b.kind !== 'paragraph' || b.role)) {
-      console.error('[cap-debug] RE命中但未标:', b.kind, b.role ?? '-', b.text.length, JSON.stringify(b.text.slice(0, 30)))
     }
   }
 }
