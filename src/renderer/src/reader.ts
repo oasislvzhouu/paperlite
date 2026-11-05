@@ -578,10 +578,40 @@ async function parseAllPages(): Promise<void> {
         }
         const latexList = JSON.parse(await window.paperlite.pageParseParse(dataUrl)) as string[]
         if (!Array.isArray(latexList) || latexList.length === 0) continue
-        // 按顺序回填到该页的 formula 块
+        // 配对策略：数量相等→按序直配（最可靠）；数量不等→变量重叠度匹配，
+        // 相似度不足则跳过该块（避免错位渲染出错误公式）
+        const assign: Array<string | null> = fBlocks.map(() => null)
+        if (latexList.length === fBlocks.length) {
+          latexList.forEach((lx, k) => (assign[k] = lx))
+        } else {
+          const varTokens = (txt: string): Set<string> =>
+            new Set((txt.match(/[A-Za-z][A-Za-z0-9]{0,6}/g) ?? []).map((t) => t.toLowerCase()))
+          const used = new Set<number>()
+          fBlocks.forEach((b, bi) => {
+            const bVars = varTokens(b.text)
+            let best = -1
+            let bestScore = 0
+            latexList.forEach((lx, li) => {
+              if (used.has(li)) return
+              const lVars = varTokens(lx)
+              let hit = 0
+              for (const v of bVars) if (lVars.has(v)) hit++
+              const score = bVars.size > 0 ? hit / bVars.size : 0
+              if (score > bestScore) {
+                bestScore = score
+                best = li
+              }
+            })
+            // 置信门槛：变量重叠 ≥40% 才采用
+            if (best >= 0 && bestScore >= 0.4) {
+              assign[bi] = latexList[best]
+              used.add(best)
+            }
+          })
+        }
         let n = 0
         for (const b of fBlocks) {
-          const latex = latexList[n]
+          const latex = assign[n]
           n++
           if (!latex) continue
           // 污染检测：LLM 把周边正文（≥3 个 4 字母英文词）写进 LaTeX → 跳过该条，

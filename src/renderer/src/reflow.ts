@@ -540,14 +540,20 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
 
-    // 孤儿上下标碎片：整行都是小字号（公式的下标散件，如 7pt 的 "t"/"u trn"）
-    // → 并入前一块；含数学特征的中短碎片行（display 公式的下标聚合行）并入前公式块
-    const tinyDebris =
-      l.fontSize > 0 &&
-      l.fontSize < bodySize * 0.85 &&
+    // 孤立碎片（内容判据，不依赖字号——MuPDF 的 bbox.h 与正文接近：
+    // ① 极短无标点孤立行（"t"、"u trn"）② 含希腊/数学符号的短行
+    // （"L(πθ), the optimization of L(πθ)"）→ 并入前块
+    const stripped = l.text.replace(/\s/g, '')
+    const isOrphanShort =
       !l.eqNumbered &&
-      (l.text.replace(/\s/g, '').length <= 12 ||
-        (l.charMathRatio >= 0.12 && l.text.length <= 80))
+      stripped.length <= 3 &&
+      /^[A-Za-z]$/.test(stripped)
+    const isGreekShort =
+      !l.eqNumbered &&
+      l.text.length <= 60 &&
+      /[\u0370-\u03FF]/.test(l.text) &&
+      (l.text.match(/[A-Za-z]{4,}/g) ?? []).length <= 3
+    const tinyDebris = isOrphanShort || isGreekShort
     // 公式块后的小字号行：display 公式的下标散件，无条件并入（字号是强证据）。
     // 不进 bufLines——公式 rect 保持主体行范围，避免 LLM 裁图混入碎片段
     if (
@@ -587,7 +593,14 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    const heading = !isFormulaLine(l) && !l.eqCollect && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
+    // 公式优先：含等号/数学符号/Greek 的行即使 bbox 偏大（上下标撑高）也不是标题。
+    // 典型误判："optimal policy θopt = arg max" 曾被当作大标题
+    const looksMathy =
+      /[=⊕∘∇]/.test(l.text) || /[\u0370-\u03FF]/.test(l.text) || l.eqNumbered
+    const headingEligible =
+      !isFormulaLine(l) && !l.eqCollect && !looksMathy
+    const heading =
+      headingEligible && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
     const kind: 'heading' | 'paragraph' | 'formula' =
       l.eqCollect || isFormulaLine(l)
         ? 'formula'
@@ -1016,12 +1029,53 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   mergeFormulaClusters(blocks, bodySize)
+  mergeOrphanFragments(blocks)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
+}
+
+/** 孤立碎片块归并（块级后处理）：极短无标点行 / 含希腊符号且散文词≤3 的
+ *  短段，与相邻块垂直间距 ≤20pt 时并入（优先前一块以保留公式类型） */
+function mergeOrphanFragments(blocks: ReflowBlock[]): void {
+  const isOrphan = (b: ReflowBlock): boolean => {
+    if (b.kind !== 'paragraph' || b.role) return false
+    const t = b.text.trim()
+    if (t.length === 0 || t.length > 70) return false
+    if (/^[A-Za-z]$/.test(t)) return true
+    const prose = (t.match(/[A-Za-z]{4,}/g) ?? []).filter((w) => !MATH_WORD_RE.test(w))
+    return /[\u0370-\u03FF=⊕∘∇]/.test(t) && prose.length <= 3
+  }
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (!isOrphan(b)) continue
+    const prev = blocks[i - 1]
+    const next = blocks[i + 1]
+    // 含运算符的碎片（公式残件）允许更大间距（段距级 ~45pt），
+    // 纯单字母碎片仍用紧阈值（20pt）
+    const hasOp = /[=←⊕∘∇]/.test(b.text)
+    const limit = hasOp ? 45 : 20
+    const closeTo = (x: ReflowBlock | undefined): boolean =>
+      !!x &&
+      x.page === b.page &&
+      x.top !== undefined &&
+      b.top !== undefined &&
+      Math.abs(b.top - x.top) <= limit
+    if (prev && prev.kind !== 'image' && closeTo(prev)) {
+      prev.text = `${prev.text} ${b.text}`.replace(/\s+/g, ' ').trim()
+      if (b.html) prev.html = `${prev.html ?? ''} ${b.html}`.trim()
+      blocks.splice(i, 1)
+      continue
+    }
+    if (next && next.kind !== 'image' && closeTo(next)) {
+      next.text = `${b.text} ${next.text}`.replace(/\s+/g, ' ').trim()
+      if (b.html) next.html = `${b.html ?? ''} ${next.html ?? ''}`.trim()
+      blocks.splice(i, 1)
+    }
+  }
 }
 
 /** 相邻公式碎片块聚类：同栏垂直间距 ≤18pt 的 formula 块/短碎片段
@@ -1136,6 +1190,7 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   mergeFormulaClusters(blocks, bodySize)
+  mergeOrphanFragments(blocks)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
