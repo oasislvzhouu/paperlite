@@ -1002,6 +1002,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   perPage.forEach((p, i) => ordered.push(...orderLines(kept[i], p.width)))
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
+  mergeFormulaClusters(blocks, bodySize)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
@@ -1009,6 +1010,11 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   markCaptions(blocks)
   return blocks
 }
+
+/** 相邻公式碎片块聚类：同栏垂直间距 ≤18pt 的 formula 块/短碎片段
+ *  归并为一个公式块（多行 display 公式被行聚类拆散的修复）。
+ *  gap > 18pt 视为独立元素（段距/独立公式），不合并 */
+
 
 export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
@@ -1116,12 +1122,64 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
 
   detectTableZones(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
+  mergeFormulaClusters(blocks, bodySize)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   return blocks
+}
+
+/** 相邻公式碎片块聚类：同栏垂直间距 ≤18pt 的 formula 块/短碎片段
+ *  归并为一个公式块（多行 display 公式被行聚类拆散的修复）。
+ *  gap > 18pt 视为独立元素（段距/独立公式），不合并 */
+function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
+  let i = 1
+  while (i < blocks.length) {
+    const a = blocks[i - 1]
+    const b = blocks[i]
+    if (a.top === undefined || b.top === undefined || a.page !== b.page) {
+      i++
+      continue
+    }
+    // gap >= 0：同一基线的拆分对（gap=0）与紧邻多行公式（gap≤18）都合并；
+    // gap < 0 是阅读序回跳（换栏/换页），不合并
+    const gap = b.top - a.top
+    if (gap < 0 || gap > 18) {
+      i++
+      continue
+    }
+    // 1) formula + formula（同行拆分/紧邻多行公式）→ 拼接
+    if (a.kind === 'formula' && b.kind === 'formula') {
+      a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
+      if (b.html) a.html = `${a.html ?? ''} ${b.html}`.trim()
+      if (b.rect && a.rect) {
+        a.rect = {
+          x0: Math.min(a.rect.x0, b.rect.x0),
+          x1: Math.max(a.rect.x1, b.rect.x1),
+          y0: Math.min(a.rect.y0, b.rect.y0),
+          y1: Math.max(a.rect.y1, b.rect.y1)
+        }
+      } else if (b.rect) a.rect = b.rect
+      blocks.splice(i, 1)
+      continue
+    }
+    // 2) formula + 短碎片段（≤40 字符、非正文、非编号行）→ 并入公式
+    if (
+      a.kind === 'formula' &&
+      b.kind === 'paragraph' &&
+      !b.role &&
+      b.text.length <= 40 &&
+      !/[.!?]$/.test(b.text.trim())
+    ) {
+      a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
+      if (b.html) a.html = `${a.html ?? ''} ${b.html}`.trim()
+      blocks.splice(i, 1)
+      continue
+    }
+    i++
+  }
 }
 
 /** display 公式块后的小字号下标散件段：并回公式块（字号 <0.85×正文为判据） */
