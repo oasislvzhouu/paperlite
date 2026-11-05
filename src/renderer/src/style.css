@@ -656,3 +656,17 @@ body.reflow-mode .zoomer { display: none; }
   border-radius: 8px;
   background: #fff;
 }
+
+/* 公式保真裁图（原版面渲染，对标 no-reflow-formula） */
+#reflow-article .formula.formula-fidelity {
+  padding: 0.35em 0.6em;
+  background: transparent;
+  border-color: transparent;
+}
+#reflow-article .formula img.formula-img {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 4px;
+}
