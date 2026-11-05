@@ -1166,18 +1166,19 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
     }
     blocks.splice(lastP1, 0, b)
   }
-  // 合并被脚注隔断的段落：前块不以句号结尾 + 后块小写开头 + 同页
+  // 合并被脚注隔断的段落：前块不以句号结尾 + 后块小写开头 + 同页。
+  // list-item 角色允许合并（列表项标题行 + 续行是一个逻辑段落）
   for (let i = blocks.length - 2; i >= 0; i--) {
     const a = blocks[i]
     const b = blocks[i + 1]
     if (
       a.kind === 'paragraph' &&
       b.kind === 'paragraph' &&
-      !a.role &&
+      (!a.role || a.role === 'list-item') &&
       !b.role &&
       a.page === b.page &&
       !/[.!?;:）)"']$/.test(a.text.trim()) &&
-      /^[a-z(]/.test(b.text.trim())
+      (/^[a-z(]/.test(b.text.trim()) || /^[A-Z]{2,}/.test(b.text.trim()))
     ) {
       a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ')
       a.html = `${a.html ?? a.text} ${b.html ?? b.text}`
