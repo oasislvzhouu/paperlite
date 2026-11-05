@@ -29,6 +29,12 @@ const api = {
     ipcRenderer.invoke('translations:prefetch', texts),
   /** 主进程翻译器空闲信号（全局预翻译排队时用于让路） */
   translatorBusy: (): Promise<boolean> => ipcRenderer.invoke('translator:busy'),
+  pageParseGet: (readingId: number, page: number): Promise<string | null> =>
+    ipcRenderer.invoke('pageparse:get', readingId, page),
+  pageParsePut: (readingId: number, page: number, blocksJson: string): Promise<boolean> =>
+    ipcRenderer.invoke('pageparse:put', readingId, page, blocksJson),
+  pageParseParse: (dataUrl: string): Promise<string> =>
+    ipcRenderer.invoke('pageparse:parse', dataUrl),
   recognizeFormula: (dataUrl: string): Promise<string> =>
     ipcRenderer.invoke('formula:recognize', dataUrl),
   listHighlights: (readingId: number): Promise<Array<{

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { copyFile, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { getDb, libraryDir, thumbPath } from './db'
-import { llmStatus, recognizeFormula, translateParagraphs } from './llm'
+import { llmStatus, parsePageStructured, recognizeFormula, translateParagraphs } from './llm'
 import type { ImportResult, OpenReadingResult, ReadingMeta } from '../shared/types'
 
 const isPdf = (name: string): boolean => /\.pdf$/i.test(name)
@@ -146,6 +146,36 @@ export function registerIpc(): void {
       interactiveTranslationInFlight = false
     }
   })
+
+  ipcMain.handle(
+    'pageparse:get',
+    (_e, readingId: number, page: number): string | null => {
+      const row = getDb()
+        .prepare('SELECT blocks_json FROM page_parses WHERE reading_id = ? AND page = ?')
+        .get(readingId, page) as { blocks_json: string } | undefined
+      return row ? row.blocks_json : null
+    }
+  )
+
+  ipcMain.handle(
+    'pageparse:put',
+    (_e, readingId: number, page: number, blocksJson: string): boolean => {
+      getDb()
+        .prepare(
+          'INSERT OR REPLACE INTO page_parses (reading_id, page, blocks_json, created_at) VALUES (?, ?, ?, ?)'
+        )
+        .run(readingId, page, blocksJson, new Date().toISOString())
+      return true
+    }
+  )
+
+  ipcMain.handle(
+    'pageparse:parse',
+    async (_e, dataUrl: string): Promise<string> => {
+      const blocks = await parsePageStructured(dataUrl)
+      return JSON.stringify(blocks)
+    }
+  )
 
   ipcMain.handle('formula:recognize', async (_e, dataUrl: string): Promise<string> => {
     return recognizeFormula(dataUrl)

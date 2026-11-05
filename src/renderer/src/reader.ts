@@ -5,6 +5,7 @@ import 'katex/dist/katex.min.css'
 import { extractReflowBlocks, extractReflowBlocksMupdf, cropPageImages, type MupdfPageLike, type ReflowBlock } from './reflow'
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
 import { recreatePdfWorker } from './worker-mgr'
+import { isPollutedLatex } from './llm-shared'
 
 type Mode = 'reflow' | 'original'
 
@@ -101,6 +102,10 @@ let scrollTimer: number | undefined
 
 let mode: Mode = 'reflow'
 let blocks: ReflowBlock[] | null = null
+let mupdfBlocks: ReflowBlock[] | null = null
+let llmPageBlocks = new Map<number, ReflowBlock[]>()
+let mupdfDocRef: { loadPage: (n: number) => { toPixmap: (m: unknown, c: unknown) => { asPNG: () => Uint8Array } } } | null = null
+let llmParsing = new Set<number>()
 let reflowFont = 17
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
@@ -140,6 +145,8 @@ export async function openReader(id: number): Promise<void> {
   pageNum = clamp(info.lastPage || 1, 1, doc.numPages)
   zoom = 1
   pageCanvasCache.clear()
+  llmPageBlocks.clear()
+  llmParsing.clear()
   $('#reader-title').textContent = info.title
   $('#page-total').textContent = String(doc.numPages)
   $('#shelf').hidden = true
@@ -155,6 +162,7 @@ export async function openReader(id: number): Promise<void> {
     const buf = new Uint8Array(await res.arrayBuffer())
     const mupdf = await import('mupdf')
     const mupdfDoc = mupdf.Document.openDocument(buf, 'application/pdf')
+    mupdfDocRef = mupdfDoc as unknown as typeof mupdfDocRef
     const mupdfPages: MupdfPageLike[] = []
     for (let p = 0; p < mupdfDoc.countPages(); p++) {
       mupdfPages.push(mupdfDoc.loadPage(p) as unknown as MupdfPageLike)
@@ -451,6 +459,160 @@ async function attachTables(): Promise<void> {
       void fig
     } catch {
       /* 单表失败跳过 */
+    }
+  }
+}
+
+/* ── 整页视觉 LLM 解析：后台逐页 → 结构化块替换 ── */
+
+let pageParseSeq = 0
+
+async function renderPageToDataUrl(p: number): Promise<string | null> {
+  if (!mupdfDocRef) return null
+  try {
+    const page = mupdfDocRef.loadPage(p - 1)
+    const pixmap = page.toPixmap(
+      { a: 2, b: 0, c: 0, d: 2, e: 0, f: 0 },
+      { name: 'DeviceRGB', n: 3 }
+    )
+    const png = pixmap.asPNG()
+    let binary = ''
+    for (let i = 0; i < png.length; i += 8192) {
+      binary += String.fromCharCode(...png.subarray(i, i + 8192))
+    }
+    return 'data:image/png;base64,' + btoa(binary)
+  } catch (err) {
+    console.warn('[paperlite] MuPDF 页面渲染失败 p=' + p, err)
+    return null
+  }
+}
+
+/** LLM 结构化块 → ReflowBlock[]（公式 latex 即时 KaTeX） */
+function llmBlocksToReflow(parsed: Array<{ type: string; text?: string; latex?: string }>, page: number): ReflowBlock[] {
+  const out: ReflowBlock[] = []
+  for (const b of parsed) {
+    if (b.type === 'formula' && b.latex) {
+      const latex = b.latex.trim()
+      if (!latex) continue
+      // 污染检测：LLM 把周边正文转写进 latex → 输出会不可读，
+      // 此块退化为纯文本（无 KaTeX）
+      if (isPollutedLatex(latex)) {
+        out.push({ kind: 'paragraph', page, text: latex, html: escapeHtmlStrV2(latex) })
+        continue
+      }
+      let html: string
+      try {
+        html = katex.renderToString(latex, { displayMode: true, throwOnError: true, strict: false })
+      } catch {
+        html = ''
+      }
+      out.push({ kind: 'formula', page, text: latex, latex, html: html || undefined })
+      continue
+    }
+    if (b.type === 'caption') {
+      const text = (b.text ?? '').trim()
+      if (text) out.push({ kind: 'paragraph', page, text, role: 'caption', html: escapeHtmlStrV2(text) })
+      continue
+    }
+    if (b.type === 'heading') {
+      const text = (b.text ?? '').trim()
+      if (!text) continue
+      out.push({ kind: 'heading', level: /^section\s+[ivx]/i.test(text) ? 2 : 3, page, text, html: escapeHtmlStrV2(text) })
+      continue
+    }
+    const text = (b.text ?? '').trim()
+    if (text) out.push({ kind: 'paragraph', page, text, html: escapeHtmlStrV2(text) })
+  }
+  return out
+}
+
+function escapeHtmlStrV2(sv: string): string {
+  return sv.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+  )
+}
+
+/** 用 LLM 页块替换 MuPDF 块并重渲染（保留滚动位置） */
+function applyLlmPage(page: number, newBlocks: ReflowBlock[]): void {
+  if (!blocks || !mupdfBlocks || !doc) return
+  llmPageBlocks.set(page, newBlocks)
+  const merged: ReflowBlock[] = []
+  const numPages = doc.numPages
+  for (let p = 1; p <= numPages; p++) {
+    const llm = llmPageBlocks.get(p)
+    if (llm) merged.push(...llm)
+    else merged.push(...mupdfBlocks.filter((b) => b.page === p))
+  }
+  const st = $('#reflow-wrap').scrollTop
+  blocks = merged
+  renderReflow()
+  applyWidth()
+  $('#reflow-wrap').scrollTop = st
+  void hydrateTranslations()
+}
+
+/** 后台逐页解析（2 并发），完成一页替换一页 */
+async function parseAllPages(): Promise<void> {
+  const docAtStart = doc
+  if (!docAtStart) return
+  const rid = readingId
+  void docAtStart
+  const pages = Array.from({ length: docAtStart.numPages }, (_, k) => k + 1)
+  const total = pages.length
+  let done = 0
+  const chipText = (): HTMLElement => document.querySelector('#trans-status-text') as HTMLElement
+  const chip = (): HTMLElement => document.querySelector('#trans-status') as HTMLElement
+  void docAtStart
+  const showChip = (txt: string): void => {
+    const c = chip()
+    if (c && chipText()) {
+      c.classList.remove('done')
+      c.hidden = false
+      chipText().textContent = txt
+    }
+  }
+  const status = docAtStart ? await window.paperlite.llmStatus() : { hasKey: false }
+  if (!status.hasKey) return
+
+  const queue = [...pages]
+  const worker = async (): Promise<void> => {
+    while (queue.length > 0 && docAtStart && readingId === rid) {
+      const p = queue.shift()
+      if (p === undefined) return
+      try {
+        const cached = await window.paperlite.pageParseGet(rid, p)
+        if (cached) {
+          const parsed = JSON.parse(cached) as Array<{ type: string; text?: string; latex?: string }>
+          llmPageBlocks.set(p, llmBlocksToReflow(parsed, p))
+        } else {
+          const dataUrl = await renderPageToDataUrl(p)
+          if (!dataUrl) continue
+          const reply = await window.paperlite.pageParseParse(dataUrl)
+          const parsed = JSON.parse(reply) as Array<{ type: string; text?: string; latex?: string }>
+          llmPageBlocks.set(p, llmBlocksToReflow(parsed, p))
+          void window.paperlite.pageParsePut(rid, p, reply)
+          done++
+          showChip(`AI 版面解析 ${done}/${total} 页`)
+        }
+        if (docAtStart && readingId === rid) {
+          applyLlmPage(p, llmPageBlocks.get(p) ?? [])
+        }
+      } catch (err) {
+        console.warn('[paperlite] 页面解析失败（跳过）p=' + p, err)
+      }
+    }
+  }
+  await Promise.all([worker(), worker()])
+  if (docAtStart && readingId === rid) {
+    const c = chip()
+    if (c && chipText()) {
+      chipText().textContent = `AI 版面解析完成 ✓ ${total} 页`
+      c.classList.remove('done')
+      c.hidden = false
+      window.setTimeout(() => {
+        c.classList.add('done')
+        window.setTimeout(() => (c.hidden = true), 500)
+      }, 1800)
     }
   }
 }

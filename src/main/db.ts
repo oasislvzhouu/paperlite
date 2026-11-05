@@ -35,6 +35,13 @@ export function initDb(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_readings_recent
       ON readings(last_opened_at DESC, added_at DESC);
+    CREATE TABLE IF NOT EXISTS page_parses (
+      reading_id INTEGER NOT NULL,
+      page       INTEGER NOT NULL,
+      blocks_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (reading_id, page)
+    );
     CREATE TABLE IF NOT EXISTS translations (
       src_sha    TEXT PRIMARY KEY,
       trans      TEXT NOT NULL,

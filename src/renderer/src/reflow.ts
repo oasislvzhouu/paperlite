@@ -11,6 +11,8 @@ import type { PDFDocumentProxy } from 'pdfjs-dist'
 
 export interface ReflowBlock {
   kind: 'heading' | 'paragraph' | 'formula' | 'image' | 'table'
+  /** LLM 整页解析产出的公式 LaTeX（渲染层直接 KaTeX） */
+  latex?: string | 'table'
   /** heading 级别：1 = 最大字号 */
   level?: number
   /** 来源 PDF 页码（1 起） */
