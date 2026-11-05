@@ -99,6 +99,8 @@ export interface Line {
   tableZone?: { x0: number; x1: number; y0: number; y1: number }
   /** 编号锚定的公式行（display 公式的碎片主体/编号行） */
   eqCollect?: boolean
+  /** 编号行的公式区（整栏宽 × 上下正文行之间），KaTeX 裁图用 */
+  eqZone?: { x0: number; x1: number; y0: number; y1: number }
 }
 
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
@@ -500,7 +502,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           : { kind: bufKind, page: bufPage, text }
       if (bufKind !== 'formula' || /<[a-z]/i.test(html)) block.html = html
       if (bufKind === 'formula' && bufLines.length > 0) {
-        block.rect = {
+        // 编号行的整栏公式区优先（覆盖主体行+上下标散件+编号），裁图完整
+        const zone = bufLines.find((l) => l.eqZone)?.eqZone
+        block.rect = zone ?? {
           x0: Math.min(...bufLines.map((l) => l.x0)),
           x1: Math.max(...bufLines.map((l) => l.x1)),
           y0: Math.min(...bufLines.map((l) => l.yTop)),
@@ -942,8 +946,15 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   const perPage: { lines: Line[]; height: number; width: number }[] = []
   for (let p = 0; p < pages.length; p++) {
     const stext = JSON.parse(pages[p].toStructuredText().asJSON())
+    // 图表内部标签微小块（宽 <45pt 的真文本，如 Fig.3 的 "Xincep="/"6664"）：
+    // 页内 ≥4 个时视为图表标签群，整组跳过（图片裁剪已含视觉信息）
+    const tinyBlocks = stext.blocks.filter(
+      (b: { type: string; bbox: { w: number }; lines?: Array<{ text?: string }> }) => b.type === 'text' && b.bbox.w < 45 && (b.lines ?? []).every((l: { text?: string }) => (l.text ?? '').length <= 30)
+    )
+    const skipTiny = tinyBlocks.length >= 4 ? new Set(tinyBlocks) : null
     const lines: Line[] = []
     for (const block of stext.blocks) {
+      if (skipTiny?.has(block)) continue
       for (const l of block.lines ?? []) {
         const text = (l.text ?? '').replace(/\s+/g, ' ').trim()
         if (!text) continue
@@ -1067,7 +1078,8 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
     if (!standalone && !(tail && tail[1].length <= 70 && l.charMathRatio >= 0.04 && l.fragCount >= 2)) continue
     l.eqCollect = true
     // 向上回溯：收集紧邻的数学碎片行
-    for (let j = i - 1; j >= 0; j--) {
+    let j = i - 1
+    for (; j >= 0; j--) {
       const prev = ordered[j]
       if (prev.page !== l.page) break
       if (prev.eqCollect) continue
@@ -1077,6 +1089,27 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
       if (!mathy) break
       prev.eqCollect = true
     }
+    // 公式区（zone）：上下正文行之间 × 所在栏宽。LLM 裁图用完整区域，
+    // 避免 rect 只含主体行导致裁图缺右半 → 识别出截断 LaTeX。
+    // above/below 必须在编号行的视觉上/下方——双栏流里编号行后的下一行
+    // 可能是另一栏顶部（yTop 更小），直接用会算出负高度
+    const above = j >= 0 && ordered[j].page === l.page && ordered[j].yTop < l.yTop ? ordered[j] : null
+    const belowRaw = ordered[i + 1]
+    const below =
+      belowRaw && belowRaw.page === l.page && belowRaw.yTop > l.yTop ? belowRaw : null
+    const colX0 = Math.min(l.x0, above ? above.x0 : l.x0, below ? below.x0 : l.x0)
+    const colX1 = Math.max(l.x1, above ? above.x1 : l.x1, below ? below.x1 : l.x1)
+    const zone = {
+      x0: Math.max(20, colX0 - 6),
+      x1: Math.min(592, colX1 + 6),
+      y0: above ? above.yTop + above.fontSize : Math.max(0, l.yTop - bodySize * 3),
+      y1: below ? below.yTop : Math.min(792, l.yTop + bodySize * 4)
+    }
+    if (zone.y1 <= zone.y0) {
+      zone.y0 = Math.max(0, l.yTop - 2)
+      zone.y1 = Math.min(792, l.yTop + l.fontSize + 2)
+    }
+    l.eqZone = zone
   }
 
   detectTableZones(ordered, bodySize)
