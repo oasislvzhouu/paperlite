@@ -3,3 +3,8 @@ out/
 dist/
 *.log
 .DS_Store
+
+# 裁图验收产物
+crops/
+crops-fix/
+shots/

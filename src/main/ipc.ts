@@ -1,6 +1,6 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { BrowserWindow, app, dialog, ipcMain } from 'electron'
 import { createHash } from 'node:crypto'
-import { copyFile, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { getDb, libraryDir, thumbPath } from './db'
 import { llmStatus, parsePageFormulas, recognizeFormula, translateParagraphs } from './llm'
@@ -74,17 +74,26 @@ export function registerIpc(): void {
     return { imported, duplicates, invalid }
   })
 
-  ipcMain.handle('library:delete', (_e, id: number): boolean => {
+  ipcMain.handle('library:delete', async (_e, id: number): Promise<boolean> => {
     const row = getDb().prepare('SELECT * FROM readings WHERE id = ?').get(id) as
       | ReadingMeta
       | undefined
     if (!row) return false
     getDb().prepare('DELETE FROM readings WHERE id = ?').run(id)
-    // 只有当没有其他条目共用同一份物理文件（sha 相同）时才删除文件
+    // 只有当没有其他条目共用同一份物理文件（sha 相同）时才处理文件
     const shared = getDb()
       .prepare('SELECT COUNT(*) AS c FROM readings WHERE sha256 = ?')
       .get(row.sha256) as { c: number }
-    if (shared.c === 0) unlink(row.file_path).catch(() => {})
+    // 不直接 unlink（误删不可恢复）：移入 userData/trash 保留一份，
+    // 用户反悔时可手动找回
+    if (shared.c === 0) {
+      const trashDir = join(app.getPath('userData'), 'trash')
+      const dest = join(trashDir, `${row.sha256.slice(0, 16)}-${id}.pdf`)
+      await mkdir(trashDir, { recursive: true }).catch(() => {})
+      await rename(row.file_path, dest).catch(() => {
+        unlink(row.file_path).catch(() => {})
+      })
+    }
     unlink(thumbPath(id)).catch(() => {})
     return true
   })

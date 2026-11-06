@@ -23,8 +23,10 @@ export interface ReflowBlock {
   html?: string
   /** 图片块：裁剪出的 dataURL */
   images?: string[]
-  /** 公式块：页面上的源区域（pt，y 自页顶向下），用于裁图送 LLM 识别 LaTeX */
+  /** 公式块：页面上的源区域（pt，y 自页顶向下），用于裁图 */
   rect?: { x0: number; x1: number; y0: number; y1: number }
+  /** 公式块：编号锚定的整栏区域（仅供 LLM 识别路径，不作裁图依据） */
+  eqZone?: { x0: number; x1: number; y0: number; y1: number }
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
   /** 首行字号（脚注检测用） */
@@ -102,6 +104,9 @@ export interface Line {
   /** ≤2 字符的碎片占比（排版公式常被导出为逐符号碎片） */
   shortFragRatio: number
   fragCount: number
+  /** 词数（pdf.js 的 fragCount 是文本项数、MuPDF 行是整行——
+   *  判断"是否长句"必须用词数，不能用 fragCount） */
+  wordCount: number
   /** 行尾是否带公式编号，如 "(12)" */
   eqNumbered: boolean
   /** 渲染用安全 HTML（含 sub/sup） */
@@ -116,6 +121,8 @@ export interface Line {
   isRefStart?: boolean
   /** 编号锚定的公式行（display 公式的碎片主体/编号行） */
   eqCollect?: boolean
+  /** 预处理阶段已并入其他行的残留（编号行等），主循环跳过 */
+  skip?: boolean
   /** 编号行的公式区（整栏宽 × 上下正文行之间），KaTeX 裁图用 */
   eqZone?: { x0: number; x1: number; y0: number; y1: number }
 }
@@ -325,6 +332,7 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
         charMathRatio: chars.length > 0 ? mathChars / chars.length : 0,
         shortFragRatio: sg.length > 0 ? shortFrags / sg.length : 0,
         fragCount: sg.length,
+        wordCount: text.split(/\s+/).filter(Boolean).length,
         eqNumbered: /\(\s*\d+\s*\)\s*$/.test(text),
         text,
         html: joined.html
@@ -534,14 +542,19 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           : { kind: bufKind, page: bufPage, text }
       if (bufKind !== 'formula' || /<[a-z]/i.test(html)) block.html = html
       if (bufKind === 'formula' && bufLines.length > 0) {
-        // 编号行的整栏公式区优先（覆盖主体行+上下标散件+编号），裁图完整
+        // 裁图 rect 一律用公式行自身的紧包围盒（上下各留 0.6 字高余量，
+        // 覆盖分式/根式/上下标外溢）。eqZone 是"编号行到相邻正文行"的
+        // 整栏区间，相邻行很远时会把大段正文圈进裁图 —— 只保留给 LLM
+        // 识别路径，不能作为裁图依据。
+        const fs0 = Math.max(...bufLines.map((l) => l.fontSize || 8))
+        const padY = Math.max(4, fs0 * 0.6)
+        const y0 = Math.min(...bufLines.map((l) => l.yTop)) - padY
+        const y1 = Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6))) + padY
+        const x0 = Math.min(...bufLines.map((l) => l.x0))
+        const x1 = Math.max(...bufLines.map((l) => l.x1))
+        block.rect = { x0, x1, y0, y1 }
         const zone = bufLines.find((l) => l.eqZone)?.eqZone
-        block.rect = zone ?? {
-          x0: Math.min(...bufLines.map((l) => l.x0)),
-          x1: Math.max(...bufLines.map((l) => l.x1)),
-          y0: Math.min(...bufLines.map((l) => l.yTop)),
-          y1: Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6)))
-        }
+        if (zone) block.eqZone = zone
       }
       if (bufLines[0]) {
         block.top = bufLines[0].yTop
@@ -555,8 +568,56 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     bufLines = []
   }
 
+  // ── 公式散件预处理 ──
+  // ① 分式的分子/分母、上下标常被拆成独立小字号行且落在同一基线附近，
+  //    单独成块会让裁图切掉分母（实测公式 (8) 分母被切半）
+  // ② 独立编号行 "(11)" 离公式主体很远时会被栏切分到另一个块，
+  //    裁图只剩一个编号 —— 按同基线并回公式行
+  const isMathish = (x: Line): boolean =>
+    x.eqNumbered ||
+    /[=⊕∘∇←→]/.test(x.text) ||
+    x.charMathRatio >= 0.1 ||
+    x.shortFragRatio >= 0.5
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
+    if (l.skip) continue
+    // ② 独立编号行：合并到同基线最近的公式行
+    if (/^\(\s*\d{1,2}\s*\)$/.test(l.text.trim())) {
+      let best = -1
+      let bestDx = Number.POSITIVE_INFINITY
+      for (let k = 0; k < lines.length; k++) {
+        const m = lines[k]
+        if (m === l || m.page !== l.page || m.skip) continue
+        if (Math.abs(m.yTop - l.yTop) > 3) continue
+        if (!isMathish(m)) continue
+        const dx = Math.min(Math.abs(m.x1 - l.x0), Math.abs(l.x1 - m.x0))
+        if (dx < bestDx && dx < 320) { bestDx = dx; best = k }
+      }
+      if (best >= 0) {
+        const m = lines[best]
+        m.text = `${m.text} ${l.text}`.replace(/\s+/g, ' ')
+        m.html = `${m.html} ${l.html}`
+        m.x1 = Math.max(m.x1, l.x1)
+        m.eqNumbered = true
+        l.skip = true
+      }
+      continue
+    }
+    // ① 小字号散件：贴近公式行且本身很短 → 标记为公式行（随后并入公式块）
+    if (l.fontSize > 0 && l.fontSize < bodySize * 0.85 && l.text.trim().length <= 60) {
+      const near = (x: Line | undefined): boolean =>
+        !!x &&
+        x.page === l.page &&
+        Math.abs(x.yTop - l.yTop) < bodySize * 1.5 &&
+        isMathish(x) &&
+        !(x.x1 < l.x0 - 40 || l.x0 > x.x1 + 40)
+      if (near(lines[i - 1]) || near(lines[i + 1])) l.eqCollect = true
+    }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    if (l.skip) continue
 
     // 孤立碎片（内容判据，不依赖字号——MuPDF 的 bbox.h 与正文接近：
     // ① 极短无标点孤立行（"t"、"u trn"）② 含希腊/数学符号的短行
@@ -784,12 +845,18 @@ export function extractImageRects(
       }
       // clamp 到页面范围：越界放置的图片对象（如 y1 超出页高）会
       // 污染聚类包围盒与裁剪区域，导致图表显示巨大且错乱
-      rects.push({
+      const cl = {
         x0: Math.max(0, rect.x0),
         y0: Math.max(0, rect.y0),
         x1: Math.min(pageW, rect.x1),
         y1: Math.min(pageH, rect.y1)
-      })
+      }
+      // 作者头像/证件照（小尺寸竖版图，期刊作者简介区）：不是内容图表，
+      // 混进重排正文只会变成一排无意义人像
+      const w = cl.x1 - cl.x0
+      const h = cl.y1 - cl.y0
+      if (w < 150 && h > w * 1.15 && h < 240) continue
+      rects.push(cl)
     }
   }
   return rects
@@ -910,6 +977,7 @@ export async function cropPageImages(
       charMathRatio: 0,
       shortFragRatio: 0,
       fragCount: 1,
+      wordCount: 0,
       eqNumbered: false,
       image: out.toDataURL('image/jpeg', 0.92)
     })
@@ -1059,6 +1127,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
           charMathRatio: chars.length ? mathChars / chars.length : 0,
           shortFragRatio: words.length ? shortWords / words.length : 0,
           fragCount: words.length,
+          wordCount: words.length,
           eqNumbered: /\(\s*\d+\s*\)\s*$/.test(text)
         })
       }
@@ -1417,17 +1486,39 @@ const TABLE_CAPTION_RE = /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
 export function detectTableZones(lines: Line[], bodySize: number): void {
   const isTableRow = (l: Line): boolean => {
     const t = l.text.replace(/\s/g, '')
+    // 长句不是表格行（MuPDF 路径 fragCount=词数，旧判据 fragCount>=3 会把
+    // 普通正文全部误收 → 表格裁图吞掉大段正文/整页）
+    if (l.wordCount > 12) return false
+    if (l.text.length > 100) return false
     if (t.length <= 8) return true // 短单元格
-    if (l.fragCount >= 3 && l.text.length < 90) return true // 多列对齐行（限长防吞正文）
+    if (l.wordCount >= 3 && l.text.length < 70) return true // 多列对齐行
     if (t.length < 32 && /\d|[/.]/.test(t)) return true // 数字/斜杠数据行
     return false
   }
-  const isProse = (l: Line): boolean =>
-    l.text.length > 60 && l.fragCount <= 2 && !TABLE_CAPTION_RE.test(l.text)
+  const isProse = (l: Line): boolean => {
+    if (TABLE_CAPTION_RE.test(l.text)) return false
+    if (l.text.length > 70 && l.wordCount >= 10) return true
+    // 短行正文（窄栏/缩排段每行 50-70 字符）：大写单词开头、8 词以上、
+    // 无多位数字 → 句子而非表格单元格
+    const t = l.text.trim()
+    return l.wordCount >= 8 && /^[A-Z][a-z]{2,}\s/.test(t) && !/\d{2,}/.test(t)
+  }
   /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体。
    *  doi/卷期页码行会被"数字/斜杠数据行"判据误收，必须显式排除 */
   const isRefEntry = (l: Line): boolean =>
     /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)\b/i.test(l.text.trim())
+  /** 表注下方同栏的第一条文本行（矢量兜底区间的右边界）。
+   *  startIdx 从表格行收集结束处开始，避免把表注副标题当边界 */
+  const nextSameColLine = (cap: Line, startIdx: number): Line | null => {
+    for (let k = startIdx; k < lines.length; k++) {
+      const l = lines[k]
+      if (l.page !== cap.page) continue
+      if (l.yTop <= cap.yTop + bodySize * 1.2) continue
+      if (l.x1 < cap.x0 - 40 || l.x0 > cap.x1 + 40) continue
+      return l
+    }
+    return null
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const cap = lines[i]
@@ -1453,6 +1544,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     // 收集表注之后同页、yTop 递增、同栏的表格体行
     const rows: Line[] = []
     let j = i + 1
+    let prevY = cap.yTop
     for (; j < lines.length; j++) {
       const l = lines[j]
       if (l.page !== cap.page) break
@@ -1462,20 +1554,28 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       if (l.x1 < cap.x0 - 40 || l.x0 > cap.x1 + 40) break
       if (isRefEntry(l)) break // 文献条目/REFERENCES 标题即断
       if (isProse(l)) break
+      // 段间空隙（>2.2 行高）→ 表格已结束，后续是正文
+      if (l.yTop - prevY > bodySize * 2.2) break
+      // 章节标题/大字号 → 表格结束
+      if (isSectionHeadingLine(l) || l.fontSize > bodySize * 1.3) break
       if (!isTableRow(l)) break
       rows.push(l)
+      prevY = l.yTop
     }
     if (rows.length < 2) {
-      // 兜底：表格体为转曲矢量（无文本层无图片对象）→ 表注到页底整块渲染。
-      // 栏感知：表注明确在单栏内时只裁该栏（US Letter 612pt 双栏中线 ~306）
-      const pageH = 792
+      // 兜底：表格体为转曲矢量（无文本层无图片对象）。区间右边界取表注
+      // 下方同栏第一条文本行（否则"表注到页底"会把整页吞成一张图）
+      const half = bodySize * 1.5
+      const nxt = nextSameColLine(cap, j)
       const colX0 = cap.x0 >= 306 ? 306 : 20
       const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
+      const y1 = nxt ? Math.min(nxt.yTop - 2, cap.yTop + 480) : 792 - 26
+      if (y1 - cap.yTop < half * 2) continue // 下方紧挨正文 → 不算表格
       cap.tableZone = {
         x0: colX0,
         x1: colX1,
         y0: cap.yTop - 2,
-        y1: pageH - 26
+        y1
       }
       continue
     }
@@ -1513,6 +1613,9 @@ const ALGO_CAPTION_RE = /^\s*algorithm\s*(?:\d{1,3}|[IVXLC]{1,6})\s*[:.·\-—�
 function isAlgoBodyLine(l: Line): boolean {
   const t = l.text.trim()
   if (!t || t.length > 95) return false
+  // 长句是正文（"The reward function in the environment can then be
+  // calculated as" 曾被当作伪代码行 → 算法框裁图吞掉后文与下一个公式）
+  if (l.wordCount > 12) return false
   if (ALGO_CAPTION_RE.test(t)) return false // 下一个算法框
   if (CAPTION_RE.test(t) || TABLE_CAPTION_RE.test(t)) return false // 图/表注
   if (/^\s*\d{1,2}\s*[:.)\-]/.test(t)) return true // 编号步骤 "1:" "2)"
@@ -1523,9 +1626,14 @@ function isAlgoBodyLine(l: Line): boolean {
     t.length < 70
   )
     return true
-  if (/[=←→⊕∘∇]/.test(t) || /[\u0370-\u03FF]/.test(t)) return true
+  if (/[=←→⊕∘∇]/.test(t)) return true
+  // 希腊字母行需同时是短行/数学占比高，纯正文里的 "π" 提及不算
+  if (/[\u0370-\u03FF]/.test(t) && (l.charMathRatio >= 0.06 || t.length < 40)) return true
   if (l.charMathRatio >= 0.1) return true
-  return l.fragCount >= 3 && t.length < 60
+  // 伪代码短行（"Sample the pseudo-label"）。不能再放宽到"任意 60 字符行"——
+  // 算法框后的正文 "The reward function in the environment can then…"
+  // 会被吞进裁图
+  return t.length < 50 && l.wordCount <= 10
 }
 
 export function detectAlgorithms(lines: Line[], bodySize: number): void {
@@ -1545,6 +1653,16 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
       if (l.page !== cap.page) break
       if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）
       if (rows.length > 0 && l.yTop - rows[rows.length - 1].yTop > bodySize * 3) break // 框级空隙
+      // 行距突变 → 伪代码框结束（框后正文段落的首行间���更大）。
+      // 用已接受行的中位行距做基准，阈值 1.45 倍
+      if (rows.length >= 3) {
+        const gaps: number[] = []
+        for (let k = 1; k < rows.length; k++) gaps.push(rows[k].yTop - rows[k - 1].yTop)
+        const medGap = gaps.sort((a, b) => a - b)[Math.floor(gaps.length / 2)]
+        if (l.yTop - rows[rows.length - 1].yTop > medGap * 1.45 + 1) break
+      }
+      // 章节标题（"C. Optimization of the MDP"）是伪代码框外内容
+      if (isSectionHeadingLine(l)) break
       if (!isAlgoBodyLine(l)) break
       if (l.yTop + (l.fontSize || 8) - cap.yTop > 300) break // 高度上限
       rows.push(l)
@@ -1579,7 +1697,7 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
         x0: prevTbl ? Math.min(colX0, prevV.x0) - 2 : colX0,
         x1: colX1,
         y0: (prevTbl ? prevV.yTop : cap.yTop) - 2,
-        y1: below.yTop - 2
+        y1: Math.min(below.yTop - 2, cap.yTop + 480)
       }
       cap.tableAlgo = true
       if (prevTbl) lines.splice(i - 1, 1)

@@ -656,6 +656,9 @@ body.reflow-mode .zoomer { display: none; }
   border-radius: 8px;
   background: #fff;
 }
+/* 裁图本身已含表注标题（TABLE n / Algorithm n），图片就位后隐藏文本图注，
+ * 避免"文字标题 + 图内标题"重复显示；图片缺失时仍作为占位说明 */
+#reflow-article figure.table:has(img) figcaption { display: none; }
 /* 算法框原子块（对标 no-reflow-code-i）：表题保持原文大小写（"Algorithm 1"），
  * 伪代码体裁图带浅底衬，视觉上区别于数据表 */
 #reflow-article figure.table.algorithm figcaption { text-transform: none; }

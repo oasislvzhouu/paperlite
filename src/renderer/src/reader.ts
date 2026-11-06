@@ -521,8 +521,8 @@ async function renderFormulasAsImages(): Promise<void> {
     const canvas = await getPageCanvasMupdf(b.page, scale)
     if (!canvas) continue
     const pageW = canvas.width / scale
-    const bandY0 = Math.max(0, Math.floor((b.rect.y0 - 6) * scale))
-    const bandY1 = Math.min(canvas.height, Math.ceil((b.rect.y1 + 6) * scale))
+    const bandY0 = Math.max(0, Math.floor((b.rect.y0 - 2) * scale))
+    const bandY1 = Math.min(canvas.height, Math.ceil((b.rect.y1 + 2) * scale))
     const bandH = Math.max(1, bandY1 - bandY0)
     const bandW = canvas.width
     const tmp = document.createElement('canvas')
