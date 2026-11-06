@@ -664,13 +664,16 @@ body.reflow-mode .zoomer { display: none; }
   background: #fafafa;
 }
 
-/* 参考文献条目（对标 pdf_reference_content）：缩小弱化、不翻译 */
+/* 参考文献条目（对标 pdf_reference_content）：缩小弱化、不翻译；
+ * 悬挂缩进让 [n] 编号顶格、续行缩进，条目边界一目了然 */
 #reflow-article p.ref-entry {
   font-size: 0.82em;
   color: var(--muted);
-  margin: 0.3em 0;
+  margin: 0.45em 0;
   text-align: left;
   hyphens: auto;
+  padding-left: 2.4em;
+  text-indent: -2.4em;
 }
 
 /* 公式保真裁图（原版面渲染，对标 no-reflow-formula） */

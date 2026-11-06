@@ -108,3 +108,4 @@ blocks.forEach((b, i) => {
   }
 })
 console.log('  ref-entry 总数:', blocks.filter((b) => b.role === 'ref-entry').length)
+console.log('  ref-entry 前6条:', JSON.stringify(blocks.filter((b) => b.role === 'ref-entry').slice(0, 6).map((b) => b.text.slice(0, 55))))

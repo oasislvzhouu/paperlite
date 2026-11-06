@@ -512,6 +512,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   let bufLevel = 0
   let bufImages: string[] = []
   let bufLines: Line[] = []
+  // 参考文献区（isRefStart 之后）：条目里的作者缩写 "H. Ahmad" 与章节
+  // 编号模式 "A. Section" 撞车，区内一律不做标题判定
+  let inRefZone = false
 
   const flush = (): void => {
     if (bufImages.length > 0) {
@@ -588,7 +591,13 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    if (l.isRefStart) flush() // REFERENCES 标题强制起新块（防并入前段尾部）
+    if (l.isRefStart) {
+      flush() // REFERENCES 标题强制起新块（防并入前段尾部）
+      inRefZone = true
+    }
+    // 引用条目标记行（"[8]" 单独成行）：新条目开始，强制分块——
+    // 否则条目连成一片，编号错位插进上一条结尾
+    if (bufT.length > 0 && /^\[\s*\d{1,3}\s*\]$/.test(l.text.trim())) flush()
 
     if (l.tableZone) {
       flush()
@@ -611,12 +620,23 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    // 公式优先：含等号/数学符号/Greek 的行即使 bbox 偏大（上下标撑高）也不是标题。
-    // 典型误判："optimal policy θopt = arg max" 曾被当作大标题
+    // 公式优先：含等号/数学符号/Greek/撇号（s′ a′ 续行撑高 bbox）的行
+    // 即使 bbox 偏大（上下标撑高）也不是标题。
+    // 典型误判："optimal policy θopt = arg max" 曾被当作大标题；
+    // "and action, respectively, and s′ and a′ denote…" 曾被当成 H1
     const looksMathy =
-      /[=⊕∘∇]/.test(l.text) || /[\u0370-\u03FF]/.test(l.text) || l.eqNumbered
+      /[=⊕∘∇×÷±≤≥≠≈∈∑∏√←→]/.test(l.text) ||
+      /[\u0370-\u03FF]/.test(l.text) ||
+      /[\u2032-\u2037]/.test(l.text) ||
+      l.eqNumbered
     const headingEligible =
-      !isFormulaLine(l) && !l.eqCollect && !looksMathy
+      !isFormulaLine(l) &&
+      !l.eqCollect &&
+      !looksMathy &&
+      // 参考文献区内不判标题（作者缩写与章节编号模式撞车）
+      !inRefZone &&
+      // 续行小写开头不是标题（真实标题以大写/数字/CJK 开头）
+      !/^[a-z]/.test(l.text.trim())
     const heading =
       headingEligible && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
     const kind: 'heading' | 'paragraph' | 'formula' =
@@ -650,17 +670,22 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       continue
     }
 
-    // 列表项：每项独立成块
-    const isListItem = kind === 'paragraph' && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
+    // 列表项：每项独立成块。文献区内不判列表项——作者缩写 "H. Ahmad"/"S. Lu"
+    // 与单字母列表编号 "a. item" 撞车
+    const isListItem =
+      kind === 'paragraph' && !inRefZone && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
 
     let brk = bufT.length === 0 || kind !== bufKind || isListItem
     if (!brk && lines[i - 1]) {
       const prev = lines[i - 1]
       const vGap = l.yTop - prev.yTop - prev.fontSize
       if (vGap > paraGap) brk = true // 段间距（自适应阈值）
-      // 首行缩进（1~4.5em 内的右移）；更大的 x0 跳变是换栏，不构成分段
+      // 首行缩进（1~4.5em 内的右移）；更大的 x0 跳变是换栏，不构成分段。
+      // 豁免引用标记 "[n]"↔条目文本的 x 跳变（标记 x0=48 文本 x0=67），
+      // 否则标记被劈成独立块再粘到上一条结尾（"[8]" 插句中的根因）
+      const isCitLine = (t: string) => /^\[\s*\d{1,3}\s*\]$/.test(t.trim())
       const dx = l.x0 - prev.x0
-      if (dx > bodySize * 1.6 && dx < bodySize * 4.5) brk = true
+      if (dx > bodySize * 1.6 && dx < bodySize * 4.5 && !isCitLine(l.text) && !isCitLine(prev.text)) brk = true
     }
 
     if (brk && (bufT.length > 0 || bufImages.length > 0)) flush()
@@ -995,9 +1020,17 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   for (let p = 0; p < pages.length; p++) {
     const stext = JSON.parse(pages[p].toStructuredText().asJSON())
     // 图表内部标签微小块（宽 <45pt 的真文本，如 Fig.3 的 "Xincep="/"6664"）：
-    // 页内 ≥4 个时视为图表标签群，整组跳过（图片裁剪已含视觉信息）
+    // 页内 ≥4 个时视为图表标签群，整组跳过（图片裁剪已含视觉信息）。
+    // 豁免引用条目标记 "[n]"——丢了标记，参考文献条目会连成一片、
+    // 编号错位插进上一条结尾
+    const isCitMarker = (
+      b: { type: string; bbox: { w: number }; lines?: Array<{ text?: string }> }
+    ): boolean => {
+      const ls = b.lines ?? []
+      return ls.length === 1 && /^\[\s*\d{1,3}\s*\]$/.test((ls[0].text ?? '').trim())
+    }
     const tinyBlocks = stext.blocks.filter(
-      (b: { type: string; bbox: { w: number }; lines?: Array<{ text?: string }> }) => b.type === 'text' && b.bbox.w < 45 && (b.lines ?? []).every((l: { text?: string }) => (l.text ?? '').length <= 30)
+      (b: { type: string; bbox: { w: number }; lines?: Array<{ text?: string }> }) => b.type === 'text' && b.bbox.w < 45 && (b.lines ?? []).every((l: { text?: string }) => (l.text ?? '').length <= 30) && !isCitMarker(b)
     )
     const skipTiny = tinyBlocks.length >= 4 ? new Set(tinyBlocks) : null
     const lines: Line[] = []
@@ -1454,13 +1487,17 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     }
     if (capRows.length >= 2) rows.length = capRows.length
     if (rows.length < 2) continue
-    // 表注行与表格体合并为 table 块（带渲染矩形），移除体行
+    // 表注行与表格体合并为 table 块（带渲染矩形），移除体行。
+    // 横向吸附到栏边界：表格三线外框/转曲列（无文本层）会超出文本行
+    // bbox，按文本裁会切掉最右列（实测 TABLE I 右列数值被切半）
     const all = [cap, ...rows]
+    const colX0 = cap.x0 >= 306 ? 306 : 20
+    const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
     cap.tableZone = {
-      x0: Math.min(...all.map((l) => l.x0)),
-      x1: Math.max(...all.map((l) => l.x1)),
+      x0: Math.min(colX0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: colX1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
-      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 2
+      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
     }
     lines.splice(i + 1, rows.length)
   }
@@ -1558,11 +1595,14 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
       TABLE_CAPTION_RE.test(prev.text.trim()) &&
       cap.yTop - (prev.yTop + Math.max(prev.fontSize, 6)) < bodySize * 1.5
     if (prevIsTblCap) all.unshift(prev)
+    // 横向吸附到栏边界（与表格同理：伪代码边框/行号列可能无文本层）
+    const colX0 = cap.x0 >= 306 ? 306 : 20
+    const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
     cap.tableZone = {
-      x0: Math.min(...all.map((l) => l.x0)) - 2,
-      x1: Math.max(...all.map((l) => l.x1)) + 2,
+      x0: Math.min(colX0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: colX1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
-      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 2
+      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
     }
     cap.tableAlgo = true
     lines.splice(prevIsTblCap ? i - 1 : i + 1, rows.length + (prevIsTblCap ? 1 : 0))
@@ -1665,6 +1705,13 @@ export function markReferences(blocks: ReflowBlock[]): void {
       continue
     }
     if (b.kind === 'heading' && REFS_END_HEADING_RE.test(t)) break
+    // 条目段（含被章节编号模式误判成 heading 的——作者缩写 "H. Ahmad" 与
+    // "A. Section" 撞车）：条目特征（et al./卷期/引号/[N]）降级回段落
+    if (b.kind === 'heading' && /et al\.|vol\.|pp\.|["“]|\[\s*\d|doi:|arXiv:/i.test(t)) {
+      b.kind = 'paragraph'
+      b.role = 'ref-entry'
+      continue
+    }
     if (b.kind === 'paragraph' && (!b.role || b.role === 'list-item')) b.role = 'ref-entry'
   }
 }
