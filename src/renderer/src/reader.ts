@@ -451,7 +451,7 @@ async function attachTables(): Promise<void> {
       const canvas = await getPageCanvasMupdf(b.page, 3)
       if (!canvas) continue
       const scale = 3
-      const pad = 4
+      const pad = 1
       const x = Math.max(0, Math.floor((b.rect.x0 - pad) * scale))
       const y = Math.max(0, Math.floor((b.rect.y0 - pad) * scale))
       const w = Math.min(canvas.width - x, Math.ceil((b.rect.x1 - b.rect.x0 + pad * 2) * scale))

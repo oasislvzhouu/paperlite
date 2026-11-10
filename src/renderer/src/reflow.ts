@@ -578,6 +578,42 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     /[=⊕∘∇←→]/.test(x.text) ||
     x.charMathRatio >= 0.1 ||
     x.shortFragRatio >= 0.5
+
+  // ⓪ 同一基线的公式碎片合并：MuPDF 把 "rt = R" / "Yv, Ŷt" / "(11)" 拆成
+  //    三条独立行（pdf.js 路径有 fragsToLines 做同样的事）。不合并的话
+  //    一个公式会被裁成两三张图，每张都缺一半
+  for (let i = 0; i < lines.length; i++) {
+    const a = lines[i]
+    if (a.skip || !isMathish(a)) continue
+    const rowFrags: Line[] = [a]
+    for (let j = 0; j < lines.length; j++) {
+      const b = lines[j]
+      if (b === a || b.skip || b.page !== a.page) continue
+      if (Math.abs(a.yTop - b.yTop) > 2.5) continue
+      // 文字符号碎片（"Yv, Ŷt" / "(11)" / 上标 v）本身未必带数学记号，
+      // 只要足够短且紧贴公式行就并入
+      if (!isMathish(b) && b.text.trim().length > 20) continue
+      // 只合并紧邻碎片：两列之间的间距远大于 2.5 行高
+      let best = Number.POSITIVE_INFINITY
+      for (const f of rowFrags) {
+        const gap = b.x0 > f.x1 ? b.x0 - f.x1 : f.x0 > b.x1 ? f.x0 - b.x1 : 0
+        if (gap < best) best = gap
+      }
+      if (best > Math.max(18, bodySize * 2.5)) continue
+      rowFrags.push(b)
+    }
+    if (rowFrags.length < 2) continue
+    rowFrags.sort((p, q) => p.x0 - q.x0)
+    a.text = rowFrags.map((f) => f.text).join(' ').replace(/\s+/g, ' ').trim()
+    a.html = a.text
+    a.x0 = Math.min(...rowFrags.map((f) => f.x0))
+    a.x1 = Math.max(...rowFrags.map((f) => f.x1))
+    a.eqNumbered = rowFrags.some((f) => f.eqNumbered)
+    a.wordCount = a.text.split(/\s+/).filter(Boolean).length
+    a.fragCount = a.wordCount
+    for (const f of rowFrags) if (f !== a) f.skip = true
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
     if (l.skip) continue
@@ -603,8 +639,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       }
       continue
     }
-    // ① 小字号散件：贴近公式行且本身很短 → 标记为公式行（随后并入公式块）
-    if (l.fontSize > 0 && l.fontSize < bodySize * 0.85 && l.text.trim().length <= 60) {
+    // ① 公式散件：分式分子/分母/上下标常被拆成独立行（字号可能仍是正文
+    //    大小，如 "j=1 exp"）。自身带数学记号或字号偏小、且贴近公式行时
+    //    标记为公式行，随后并入公式块 —— 否则公式 (8) 的分母被漏裁
+    const len = l.text.trim().length
+    if (len <= 40 && (isMathish(l) || (l.fontSize > 0 && l.fontSize < bodySize * 0.9))) {
       const near = (x: Line | undefined): boolean =>
         !!x &&
         x.page === l.page &&
@@ -638,15 +677,25 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     if (
       bufKind === 'formula' &&
       bufT.length > 0 &&
+      bufLines.length > 0 &&
       l.fontSize > 0 &&
       l.fontSize < bodySize * 0.85 &&
-      !l.eqNumbered
+      !l.eqNumbered &&
+      // 距离约束：小字号行可能是**另一个**公式的分式散件（页面上相隔很远），
+      // 无条件并入会让 rect 跨过两式之间的正文（实测 (11) 裁图裹进半页正文）
+      Math.abs(l.yTop - bufLines[bufLines.length - 1].yTop) <= bodySize * 2.4
     ) {
       bufT.push(l.text)
       bufH.push(l.html)
       continue
     }
-    if (tinyDebris && bufT.length > 0 && l.text.replace(/\s/g, '').length <= 12) {
+    if (
+      tinyDebris &&
+      bufT.length > 0 &&
+      bufLines.length > 0 &&
+      l.text.replace(/\s/g, '').length <= 12 &&
+      Math.abs(l.yTop - bufLines[bufLines.length - 1].yTop) <= bodySize * 2.4
+    ) {
       bufT.push(l.text)
       bufH.push(l.html)
       continue
@@ -709,7 +758,15 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
 
     // 孤立公式编号行（"(1)"）：紧跟公式块或编号行的并入前块
 
-    if (bufKind === 'formula' && bufT.length > 0 && /^\(\d{1,2}\)$/.test(l.text.trim())) {
+    if (
+      bufKind === 'formula' &&
+      bufT.length > 0 &&
+      bufLines.length > 0 &&
+      /^\(\d{1,2}\)$/.test(l.text.trim()) &&
+      // 编号行必须紧贴当前公式块，否则会在两个相隔很远的公式之间拉出
+      // 跨页 rect（实测 (11) 与 (12) 被并成一张裁图）
+      Math.abs(l.yTop - bufLines[bufLines.length - 1].yTop) <= bodySize * 2.4
+    ) {
       bufT.push(l.text)
       bufH.push(l.html)
       bufLines.push(l)
@@ -737,6 +794,19 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       kind === 'paragraph' && !inRefZone && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
 
     let brk = bufT.length === 0 || kind !== bufKind || isListItem
+    // 公式块内的垂直断点：阅读序会把不同公式的碎片排到一起（orderLines
+    // 的栏桶），其间可能隔着整段正文。相邻公式行 y 跨度超过 1.6 行高就
+    // 必须切块——否则 rect 横跨两式之间的正文（实测公式 (11) 裁图里
+    // 裹进半页正文）
+    if (
+      !brk &&
+      bufKind === 'formula' &&
+      kind === 'formula' &&
+      bufLines.length > 0 &&
+      Math.abs(l.yTop - bufLines[bufLines.length - 1].yTop) > bodySize * 2.4
+    ) {
+      brk = true
+    }
     if (!brk && lines[i - 1]) {
       const prev = lines[i - 1]
       const vGap = l.yTop - prev.yTop - prev.fontSize
@@ -1386,7 +1456,10 @@ function mergeFormulaDebris(blocks: ReflowBlock[], bodySize: number): void {
     if ((n.firstFontSize ?? bodySize) < bodySize * 0.85) return true
     const words = n.text.split(/\s+/).filter(Boolean)
     const shortWords = words.filter((w) => w.length <= 1).length
-    return words.length > 5 && shortWords / words.length >= 0.2
+    // 阈值收紧：正文里夹着行内公式时（"where epi is the number of episodes,
+    // pti = log πθ(ai|si) is the…"）单字母词占比也会超过 0.2，把整段正文
+    // 吸进公式裁图。要求更碎（≥0.3）且更短（≤10 词）
+    return words.length <= 10 && words.length > 4 && shortWords / words.length >= 0.3
   }
   for (let i = blocks.length - 2; i >= 0; i--) {
     const f = blocks[i]
@@ -1501,105 +1574,82 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     // 短行正文（窄栏/缩排段每行 50-70 字符）：大写单词开头、8 词以上、
     // 无多位数字 → 句子而非表格单元格
     const t = l.text.trim()
-    return l.wordCount >= 8 && /^[A-Z][a-z]{2,}\s/.test(t) && !/\d{2,}/.test(t)
+    return l.wordCount >= 8 && /^[A-Z][a-z]+\s/.test(t) && !/\d{2,}/.test(t)
   }
-  /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体。
-   *  doi/卷期页码行会被"数字/斜杠数据行"判据误收，必须显式排除 */
+  /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体 */
   const isRefEntry = (l: Line): boolean =>
-    /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)\b/i.test(l.text.trim())
-  /** 表注下方同栏的第一条文本行（矢量兜底区间的右边界）。
-   *  startIdx 从表格行收集结束处开始，避免把表注副标题当边界 */
-  const nextSameColLine = (cap: Line, startIdx: number): Line | null => {
-    for (let k = startIdx; k < lines.length; k++) {
-      const l = lines[k]
-      if (l.page !== cap.page) continue
-      if (l.yTop <= cap.yTop + bodySize * 1.2) continue
-      if (l.x1 < cap.x0 - 40 || l.x0 > cap.x1 + 40) continue
-      return l
-    }
-    return null
-  }
+    /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)/i.test(l.text.trim())
+  const colOf = (l: Line): { x0: number; x1: number } => ({
+    x0: l.x0 >= 306 ? 306 : 20,
+    x1: l.x0 >= 306 ? 592 : l.x1 <= 306 ? 302 : 592
+  })
+  /** 几何候选：同页、同栏、表注下方 480pt 内，按 y 升序。
+   *  不能按阅读序收行 —— orderLines 会把公式碎片/算法体拆到别的"栏桶"，
+   *  按序收会跨过整段正文（实测 TABLE II 因此吞掉两段正文） */
+  const candidatesBelow = (cap: Line): Line[] =>
+    lines
+      .filter(
+        (l) =>
+          l !== cap &&
+          !l.skip &&
+          l.page === cap.page &&
+          l.yTop > cap.yTop + 1 &&
+          l.yTop < cap.yTop + 480 &&
+          !(l.x1 < cap.x0 - 60 || l.x0 > cap.x1 + 60)
+      )
+      .sort((a, b) => a.yTop - b.yTop)
 
-  for (let i = 0; i < lines.length; i++) {
-    const cap = lines[i]
-    if (!cap.tableZone && !TABLE_CAPTION_RE.test(cap.text.trim())) continue
+  const consumed = new Set<Line>()
+  for (const cap of [...lines]) {
+    if (cap.skip) continue
+    if (!TABLE_CAPTION_RE.test(cap.text.trim())) continue
     if (cap.text.trim().length > 130) continue
     // 行内散文提及 "Table V reports the 95% CI of…"：编号后紧跟小写词
-    // （动词/介词）的是句中提及；真表注编号后是大写标题词或空（"TABLE II"）
     const afterNum = cap.text.trim().replace(TABLE_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
     if (/^[a-z]/.test(afterNum)) continue
-    // IEEE 算法浮动体："TABLE N" 表注正下方是 "ALGORITHM M" —— 整个
-    // 浮动体是伪代码框，交给 detectAlgorithms 原子化（转曲兜底也跳过，
-    // 否则会裁出半页误图）
-    const nextLine = lines[i + 1]
-    if (
-      nextLine &&
-      nextLine.page === cap.page &&
-      !nextLine.tableZone &&
-      nextLine.yTop > cap.yTop &&
-      ALGO_CAPTION_RE.test(nextLine.text.trim())
-    ) {
-      continue
-    }
-    // 收集表注之后同页、yTop 递增、同栏的表格体行
+    const below = candidatesBelow(cap)
+    // IEEE 算法浮动体："TABLE N" 表注正下方是 "ALGORITHM M" → 交给算法检测
+    if (below[0] && ALGO_CAPTION_RE.test(below[0].text.trim())) continue
+
     const rows: Line[] = []
-    let j = i + 1
     let prevY = cap.yTop
-    for (; j < lines.length; j++) {
-      const l = lines[j]
-      if (l.page !== cap.page) break
-      if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）→ 表格不会跨栏
-      // 同栏约束：表体行必须与表注有横向重叠（跨栏溢出会把下一栏的
-      // 文献条目/短行整片吞进来）
-      if (l.x1 < cap.x0 - 40 || l.x0 > cap.x1 + 40) break
-      if (isRefEntry(l)) break // 文献条目/REFERENCES 标题即断
-      if (isProse(l)) break
-      // 段间空隙（>2.2 行高）→ 表格已结束，后续是正文
-      if (l.yTop - prevY > bodySize * 2.2) break
-      // 章节标题/大字号 → 表格结束
-      if (isSectionHeadingLine(l) || l.fontSize > bodySize * 1.3) break
+    for (const l of below) {
+      if (consumed.has(l)) continue
+      // 段间空隙（>2.4 行高）→ 表格已结束
+      if (l.yTop - prevY > bodySize * 2.4) break
+      if (isRefEntry(l) || isProse(l) || isSectionHeadingLine(l)) break
+      if (l.fontSize > bodySize * 1.5) break
       if (!isTableRow(l)) break
+      if (l.yTop + Math.max(l.fontSize, 6) - cap.yTop > 340) break
       rows.push(l)
       prevY = l.yTop
     }
+    const boundary = below.find((l) => !rows.includes(l)) ?? null
+
     if (rows.length < 2) {
-      // 兜底：表格体为转曲矢量（无文本层无图片对象）。区间右边界取表注
-      // 下方同栏第一条文本行（否则"表注到页底"会把整页吞成一张图）
-      const half = bodySize * 1.5
-      const nxt = nextSameColLine(cap, j)
-      const colX0 = cap.x0 >= 306 ? 306 : 20
-      const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
-      const y1 = nxt ? Math.min(nxt.yTop - 2, cap.yTop + 480) : 792 - 26
-      if (y1 - cap.yTop < half * 2) continue // 下方紧挨正文 → 不算表格
-      cap.tableZone = {
-        x0: colX0,
-        x1: colX1,
-        y0: cap.yTop - 2,
-        y1
-      }
+      // 兜底：表格体为转曲矢量（无文本层）。右边界取几何上最近的同栏
+      // 文本行（原"到页底"会把整页裁成一张图）
+      const y1 = boundary ? Math.min(boundary.yTop - 2, cap.yTop + 480) : 792 - 26
+      if (y1 - cap.yTop < bodySize * 3) continue // 下方紧挨正文 → 不算表格
+      const c = colOf(cap)
+      cap.tableZone = { x0: c.x0, x1: c.x1, y0: cap.yTop - 2, y1 }
       continue
     }
-    // 表格高度上限（约 320pt）：截断超出的行，防止误吸收正文
-    const capRows: Line[] = []
-    for (const r of rows) {
-      if (r.yTop + (r.fontSize || 8) - cap.yTop > 320) break
-      capRows.push(r)
-    }
-    if (capRows.length >= 2) rows.length = capRows.length
-    if (rows.length < 2) continue
-    // 表注行与表格体合并为 table 块（带渲染矩形），移除体行。
-    // 横向吸附到栏边界：表格三线外框/转曲列（无文本层）会超出文本行
-    // bbox，按文本裁会切掉最右列（实测 TABLE I 右列数值被切半）
     const all = [cap, ...rows]
-    const colX0 = cap.x0 >= 306 ? 306 : 20
-    const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
+    const c = colOf(cap)
     cap.tableZone = {
-      x0: Math.min(colX0, Math.min(...all.map((l) => l.x0)) - 2),
-      x1: colX1,
+      x0: Math.min(c.x0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: c.x1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
-      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+      y1: Math.min(
+        boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
+        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+      )
     }
-    lines.splice(i + 1, rows.length)
+    for (const r of rows) consumed.add(r)
+  }
+  if (consumed.size > 0) {
+    for (let k = lines.length - 1; k >= 0; k--) if (consumed.has(lines[k])) lines.splice(k, 1)
   }
 }
 
@@ -1637,93 +1687,107 @@ function isAlgoBodyLine(l: Line): boolean {
 }
 
 export function detectAlgorithms(lines: Line[], bodySize: number): void {
-  for (let i = 0; i < lines.length; i++) {
-    const cap = lines[i]
-    if (cap.tableZone || cap.eqCollect) continue
+  const colOf = (l: Line): { x0: number; x1: number } => ({
+    x0: l.x0 >= 306 ? 306 : 20,
+    x1: l.x0 >= 306 ? 592 : l.x1 <= 306 ? 302 : 592
+  })
+  /** 几何候选（同表格：不能按阅读序，算法体常被 orderLines 归到别的栏桶） */
+  const candidatesBelow = (cap: Line): Line[] =>
+    lines
+      .filter(
+        (l) =>
+          l !== cap &&
+          !l.skip &&
+          l.page === cap.page &&
+          l.yTop > cap.yTop + 1 &&
+          l.yTop < cap.yTop + 480 &&
+          !(l.x1 < cap.x0 - 60 || l.x0 > cap.x1 + 60)
+      )
+      .sort((a, b) => a.yTop - b.yTop)
+  const consumed = new Set<Line>()
+
+  for (const cap of [...lines]) {
+    if (cap.skip || cap.eqCollect) continue
     if (!ALGO_CAPTION_RE.test(cap.text.trim())) continue
     if (cap.text.trim().length > 100) continue
     // 行内散文提及 "Algorithm 1 shows that…"：编号后紧跟小写词即拒绝
     const afterNum = cap.text.trim().replace(ALGO_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
     if (/^[a-z]/.test(afterNum)) continue
-    // 收集表题之后同页、yTop 递增的伪代码体行
+
+    const below = candidatesBelow(cap)
     const rows: Line[] = []
-    let j = i + 1
-    for (; j < lines.length; j++) {
-      const l = lines[j]
-      if (l.page !== cap.page) break
-      if (l.yTop < cap.yTop - 2) break // 阅读序回跳（换栏）
-      if (rows.length > 0 && l.yTop - rows[rows.length - 1].yTop > bodySize * 3) break // 框级空隙
-      // 行距突变 → 伪代码框结束（框后正文段落的首行间���更大）。
-      // 用已接受行的中位行距做基准，阈值 1.45 倍
+    const gaps: number[] = []
+    let prevY = cap.yTop
+    for (const l of below) {
+      if (consumed.has(l)) continue
+      if (l.yTop - prevY > bodySize * 3) break // 框级空隙
+      // 行距突变 → 伪代码框结束（框后正文的首行间距更大）
       if (rows.length >= 3) {
-        const gaps: number[] = []
-        for (let k = 1; k < rows.length; k++) gaps.push(rows[k].yTop - rows[k - 1].yTop)
-        const medGap = gaps.sort((a, b) => a - b)[Math.floor(gaps.length / 2)]
-        if (l.yTop - rows[rows.length - 1].yTop > medGap * 1.45 + 1) break
+        const sorted = [...gaps].sort((a, b) => a - b)
+        const med = sorted[Math.floor(sorted.length / 2)] || 0
+        if (med > 0 && l.yTop - prevY > med * 1.45 + 1) break
       }
-      // 章节标题（"C. Optimization of the MDP"）是伪代码框外内容
       if (isSectionHeadingLine(l)) break
       if (!isAlgoBodyLine(l)) break
-      if (l.yTop + (l.fontSize || 8) - cap.yTop > 300) break // 高度上限
+      if (l.yTop + Math.max(l.fontSize, 8) - cap.yTop > 300) break
+      gaps.push(l.yTop - prevY)
       rows.push(l)
+      prevY = l.yTop
     }
-    // 有效性：≥2 行伪代码才原子化。散文提到 "Algorithm 1 shows…" 的
-    // 下文是普通段落，rows 必然不足 → 自动免疫
-    // 矢量兜底：伪代码体转曲（无文本层）时 rows 为空，但表题下方同栏
-    // 会出现 ≥4 行正文高度的文本空隙 —— 空隙区即伪代码框，裁图到下一
-    // 条文本行上沿为止
+    const boundary = below.find((l) => !rows.includes(l)) ?? null
+
+    // IEEE 风格：表注 "TABLE N" 紧贴算法标题上方 → 一并纳入裁图区
+    const prevLine = lines
+      .filter(
+        (l) =>
+          l !== cap &&
+          !l.skip &&
+          l.page === cap.page &&
+          l.yTop < cap.yTop &&
+          cap.yTop - l.yTop < bodySize * 2 &&
+          !(l.x1 < cap.x0 - 60 || l.x0 > cap.x1 + 60)
+      )
+      .sort((a, b) => b.yTop - a.yTop)[0]
+    const prevTbl = !!(
+      prevLine &&
+      !prevLine.tableZone &&
+      TABLE_CAPTION_RE.test(prevLine.text.trim()) &&
+      cap.yTop - (prevLine.yTop + Math.max(prevLine.fontSize, 6)) < bodySize * 1.5
+    )
+
     if (rows.length < 2) {
-      let below: Line | null = null
-      for (let k = i + 1; k < lines.length; k++) {
-        const x = lines[k]
-        if (x.page !== cap.page) break
-        if (x.yTop <= cap.yTop) continue
-        if (x.x1 < cap.x0 - 40 || x.x0 > cap.x1 + 40) continue // 异栏行不算
-        below = x
-        break
-      }
-      const gap = below ? below.yTop - (cap.yTop + Math.max(cap.fontSize, 6)) : 0
-      if (!below || gap < bodySize * 4) continue
-      const colX0 = cap.x0 >= 306 ? 306 : cap.x1 <= 306 ? 20 : 20
-      const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
-      const prevV = lines[i - 1]
-      const prevTbl =
-        prevV &&
-        prevV.page === cap.page &&
-        !prevV.tableZone &&
-        TABLE_CAPTION_RE.test(prevV.text.trim()) &&
-        cap.yTop - (prevV.yTop + Math.max(prevV.fontSize, 6)) < bodySize * 1.5
+      // 矢量兜底：伪代码体转曲（无文本层）时靠表题下方的文本空隙定位
+      const gap = boundary ? boundary.yTop - (cap.yTop + Math.max(cap.fontSize, 6)) : 0
+      if (!boundary || gap < bodySize * 4) continue
+      const c = colOf(cap)
       cap.tableZone = {
-        x0: prevTbl ? Math.min(colX0, prevV.x0) - 2 : colX0,
-        x1: colX1,
-        y0: (prevTbl ? prevV.yTop : cap.yTop) - 2,
-        y1: Math.min(below.yTop - 2, cap.yTop + 480)
+        x0: prevTbl && prevLine ? Math.min(c.x0, prevLine.x0) - 2 : c.x0,
+        x1: c.x1,
+        y0: (prevTbl && prevLine ? prevLine.yTop : cap.yTop) - 2,
+        y1: Math.min(boundary.yTop - 2, cap.yTop + 480)
       }
       cap.tableAlgo = true
-      if (prevTbl) lines.splice(i - 1, 1)
+      if (prevTbl && prevLine) consumed.add(prevLine)
       continue
     }
-    const all = [cap, ...rows]
-    // IEEE 风格：表注 "TABLE N" 紧贴算法标题上方 → 一并纳入裁图区并移除
-    const prev = lines[i - 1]
-    const prevIsTblCap =
-      prev &&
-      prev.page === cap.page &&
-      !prev.tableZone &&
-      TABLE_CAPTION_RE.test(prev.text.trim()) &&
-      cap.yTop - (prev.yTop + Math.max(prev.fontSize, 6)) < bodySize * 1.5
-    if (prevIsTblCap) all.unshift(prev)
-    // 横向吸附到栏边界（与表格同理：伪代码边框/行号列可能无文本层）
-    const colX0 = cap.x0 >= 306 ? 306 : 20
-    const colX1 = cap.x0 >= 306 ? 592 : cap.x1 <= 306 ? 302 : 592
+
+    const all: Line[] = prevTbl && prevLine ? [prevLine, cap, ...rows] : [cap, ...rows]
+    const c = colOf(cap)
     cap.tableZone = {
-      x0: Math.min(colX0, Math.min(...all.map((l) => l.x0)) - 2),
-      x1: colX1,
+      x0: Math.min(c.x0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: c.x1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
-      y1: Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+      y1: Math.min(
+        boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
+        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+      )
     }
     cap.tableAlgo = true
-    lines.splice(prevIsTblCap ? i - 1 : i + 1, rows.length + (prevIsTblCap ? 1 : 0))
+    for (const r of rows) consumed.add(r)
+    if (prevTbl && prevLine) consumed.add(prevLine)
+  }
+  if (consumed.size > 0) {
+    for (let k = lines.length - 1; k >= 0; k--) if (consumed.has(lines[k])) lines.splice(k, 1)
   }
 }
 
