@@ -5,7 +5,7 @@ import path from 'node:path'
 const WANT = process.argv[2] ?? 'Trainable'
 const LABEL = process.argv[3] ?? 'b0'
 const BASE = 'http://127.0.0.1:9222'
-const OUT = 'C:/Users/admin/Desktop/逆向工程/paperlite/crops3'
+const OUT = 'C:/Users/admin/Desktop/逆向工程/paperlite/crops4'
 fs.mkdirSync(OUT, { recursive: true })
 
 const targets = await (await fetch(`${BASE}/json`)).json()
@@ -42,7 +42,15 @@ for (let k = 0; k < 60; k++) {
   })()`)
   if (done === 'done') break
 }
-await sleep(2000)
+// 图表管线在 8s 后才启动：多等一会，等 figure 数量稳定（图内公式清理依赖它）
+let prevFig = -1
+for (let k = 0; k < 25; k++) {
+  await sleep(1000)
+  const nf = await ev(`document.querySelectorAll('#reflow-article figure.figure').length`)
+  if (nf === prevFig && nf > 0) break
+  prevFig = nf
+}
+await sleep(1500)
 const title = await ev(`document.querySelector('#reader-title')?.textContent ?? ''`)
 console.log('opened:', title.slice(0, 50))
 

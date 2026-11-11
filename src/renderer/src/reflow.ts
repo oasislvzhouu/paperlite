@@ -468,13 +468,17 @@ function isFormulaLine(l: Line): boolean {
 /** 文本模式章节标题：罗马数字/字母编号（"I. INTRODUCTION"、"A. Pseudo-Label"），
  *  IEEE/Elsevier 小写大写章节标题字号与正文相同，字号启发式抓不到 */
 const SECTION_HEADING_RE = /^(?:[IVXLC]{1,5}|[A-Z])\.\s+\S+/
-function isSectionHeadingLine(l: Line): boolean {
-  if (l.text.length > 80) return false
-  if (!SECTION_HEADING_RE.test(l.text.trim())) return false
-  // 全大写或首字母大写的短标题，排除普通句子行（句子一般更长且含小写词开头后接逗号等）
-  const words = l.text.trim().split(/\s+/)
+function isSectionHeadingText(t: string): boolean {
+  const s = t.trim()
+  if (s.length > 80) return false
+  if (!SECTION_HEADING_RE.test(s)) return false
+  const words = s.split(/\s+/)
   if (words.length > 12) return false
-  return /^[A-Z]/.test(l.text.trim())
+  return /^[A-Z]/.test(s)
+}
+
+function isSectionHeadingLine(l: Line): boolean {
+  return isSectionHeadingText(l.text)
 }
 
 /** 全文行间隙统计：返回最常见行间隙（近似排版行距） */
@@ -547,9 +551,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         // 整栏区间，相邻行很远时会把大段正文圈进裁图 —— 只保留给 LLM
         // 识别路径，不能作为裁图依据。
         const fs0 = Math.max(...bufLines.map((l) => l.fontSize || 8))
-        const padY = Math.max(4, fs0 * 0.6)
-        const y0 = Math.min(...bufLines.map((l) => l.yTop)) - padY
-        const y1 = Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6))) + padY
+        // 上下不对称：上方只留 0.35 字高（多了会蹭到上一行正文的字头），
+        // 下方留 1.1 字高（分式/根式的分母常超出字框，留少了被切）
+        const y0 = Math.min(...bufLines.map((l) => l.yTop)) - Math.max(2, fs0 * 0.2)
+        const y1 =
+          Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6))) + Math.max(4, fs0 * 0.5)
         const x0 = Math.min(...bufLines.map((l) => l.x0))
         const x1 = Math.max(...bufLines.map((l) => l.x1))
         block.rect = { x0, x1, y0, y1 }
@@ -590,9 +596,10 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       const b = lines[j]
       if (b === a || b.skip || b.page !== a.page) continue
       if (Math.abs(a.yTop - b.yTop) > 2.5) continue
-      // 文字符号碎片（"Yv, Ŷt" / "(11)" / 上标 v）本身未必带数学记号，
-      // 只要足够短且紧贴公式行就并入
-      if (!isMathish(b) && b.text.trim().length > 20) continue
+      // 合并对象要么自身像数学，要么是极短符号碎片（"(11)" / "v" / "Ŷt"）。
+      // 阈值放宽到 20 字符会把 "and r_u is pseudo-labels…" 这类正文碎片
+      // 并进公式块 → 裁图带出标题/正文
+      if (!isMathish(b) && b.text.trim().length > 6) continue
       // 只合并紧邻碎片：两列之间的间距远大于 2.5 行高
       let best = Number.POSITIVE_INFINITY
       for (const f of rowFrags) {
@@ -806,6 +813,14 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       Math.abs(l.yTop - bufLines[bufLines.length - 1].yTop) > bodySize * 2.4
     ) {
       brk = true
+    }
+    // 跨栏防护：公式块只按 y 合并在双栏页会出事（左栏式(1) 与右栏式(2)
+    // 在阅读序里相邻）。横向范围不与当前块重叠 >3 字宽 → 换栏，另起一块
+    if (!brk && bufKind === 'formula' && kind === 'formula' && bufLines.length > 0) {
+      const bx0 = Math.min(...bufLines.map((x) => x.x0))
+      const bx1 = Math.max(...bufLines.map((x) => x.x1))
+      const gap = l.x1 < bx0 ? bx0 - l.x1 : l.x0 > bx1 ? l.x0 - bx1 : 0
+      if (gap > bodySize * 3) brk = true
     }
     if (!brk && lines[i - 1]) {
       const prev = lines[i - 1]
@@ -1155,8 +1170,22 @@ export interface MupdfPageLike {
  *  公式 KaTeX/图片裁剪）全部复用 */
 export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
+  const imgRects: Array<{ page: number; x0: number; y0: number; x1: number; y1: number }> = []
   for (let p = 0; p < pages.length; p++) {
     const stext = JSON.parse(pages[p].toStructuredText().asJSON())
+    // 图像块边界（插图）：图内文字（流程图标签/结构图公式）会被文本层
+    // 当成 formula 块单独裁图，形成"插图上叠一排重复小图" —— 用图像 bbox
+    // 在提取阶段过滤，不依赖 pdf.js 渲染管线是否可用
+    for (const b of stext.blocks as Array<{ type?: string; bbox?: { x: number; y: number; w: number; h: number } }>) {
+      if (b.type !== 'image' || !b.bbox) continue
+      imgRects.push({
+        page: p + 1,
+        x0: b.bbox.x,
+        y0: b.bbox.y,
+        x1: b.bbox.x + b.bbox.w,
+        y1: b.bbox.y + b.bbox.h
+      })
+    }
     // 图表内部标签微小块（宽 <45pt 的真文本，如 Fig.3 的 "Xincep="/"6664"）：
     // 页内 ≥4 个时视为图表标签群，整组跳过（图片裁剪已含视觉信息）。
     // 豁免引用条目标记 "[n]"——丢了标记，参考文献条目会连成一片、
@@ -1230,7 +1259,16 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   markReferences(blocks)
-  return blocks
+  // 丢弃落在插图内的公式块（图内标签，不是正文公式）
+  const keptBlocks = blocks.filter((b) => {
+    if (b.kind !== 'formula' || !b.rect) return true
+    const cx = (b.rect.x0 + b.rect.x1) / 2
+    const cy = (b.rect.y0 + b.rect.y1) / 2
+    return !imgRects.some(
+      (r) => r.page === b.page && cx >= r.x0 - 2 && cx <= r.x1 + 2 && cy >= r.y0 - 2 && cy <= r.y1 + 2
+    )
+  })
+  return keptBlocks
 }
 
 /** 孤立碎片块归并（块级后处理）：极短无标点行 / 含希腊符号且散文词≤3 的
@@ -1431,13 +1469,16 @@ function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
       blocks.splice(i, 1)
       continue
     }
-    // 2) formula + 短碎片段（≤40 字符、非正文、非编号行）→ 并入公式
+    // 2) formula + 短碎片段（≤40 字符、非正文、非编号行）→ 并入公式。
+    //    排除章节标题（"R. Formulation of the MDP" 26 字符，曾被并入公式
+    //    并把裁图拉宽到整页）与冒号结尾的引导句
     if (
       a.kind === 'formula' &&
       b.kind === 'paragraph' &&
       !b.role &&
       b.text.length <= 40 &&
-      !/[.!?]$/.test(b.text.trim())
+      !isSectionHeadingText(b.text) &&
+      !/[.!?:;]$/.test(b.text.trim())
     ) {
       a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
       if (b.html) a.html = `${a.html ?? ''} ${b.html}`.trim()
@@ -1576,6 +1617,15 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     const t = l.text.trim()
     return l.wordCount >= 8 && /^[A-Z][a-z]+\s/.test(t) && !/\d{2,}/.test(t)
   }
+  /** 页脚/页眉样式的行（"VOLUME 14, 2026"、页码、全大写卷期行）：
+   *  表格排到版心底部时页脚紧跟其后，会被当成最后一行吞进裁图 */
+  const isFooterLike = (l: Line): boolean => {
+    const t = l.text.trim()
+    if (/^(volume|vol\.?)\s+\d+/i.test(t)) return true
+    if (/^\d{1,4}$/.test(t)) return true
+    if (t.length >= 8 && !/[a-z]/.test(t) && /\d/.test(t) && /^[A-Z0-9 ,.&:()–-]+$/.test(t)) return true
+    return false
+  }
   /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体 */
   const isRefEntry = (l: Line): boolean =>
     /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)/i.test(l.text.trim())
@@ -1638,7 +1688,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       if (consumed.has(l)) continue
       // 段间空隙（>2.4 行高）→ 表格已结束
       if (l.yTop - prevY > bodySize * 2.4) break
-      if (isRefEntry(l) || isProse(l) || isSectionHeadingLine(l)) break
+      if (isRefEntry(l) || isFooterLike(l) || isProse(l) || isSectionHeadingLine(l)) break
       // 下一个表注（同页连续排版的 TABLE N / 表N）→ 当前表结束
       if (TABLE_CAPTION_RE.test(l.text.trim())) break
       if (l.fontSize > bodySize * 1.5) break
@@ -1767,6 +1817,7 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
         if (med > 0 && l.yTop - prevY > med * 1.45 + 1) break
       }
       if (isSectionHeadingLine(l)) break
+      if (/^(volume|vol\.?)\s+\d+/i.test(l.text.trim()) || /^\d{1,4}$/.test(l.text.trim())) break
       if (!isAlgoBodyLine(l)) break
       if (l.yTop + Math.max(l.fontSize, 8) - cap.yTop > 300) break
       gaps.push(l.yTop - prevY)

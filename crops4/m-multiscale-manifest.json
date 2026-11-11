@@ -1,0 +1,170 @@
+[
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "22",
+  "text": "",
+  "natural": "390x70",
+  "file": "m-multiscale-00-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "24",
+  "text": "",
+  "natural": "289x39",
+  "file": "m-multiscale-01-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "26",
+  "text": "",
+  "natural": "653x70",
+  "file": "m-multiscale-02-formula.png"
+ },
+ {
+  "kind": "table",
+  "page": 5,
+  "bi": "34",
+  "text": "TABLE I",
+  "natural": "777x780",
+  "file": "m-multiscale-03-table.jpg"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "39",
+  "text": "",
+  "natural": "793x70",
+  "file": "m-multiscale-04-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "41",
+  "text": "",
+  "natural": "567x70",
+  "file": "m-multiscale-05-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "50",
+  "text": "",
+  "natural": "275x108",
+  "file": "m-multiscale-06-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "51",
+  "text": "",
+  "natural": "282x108",
+  "file": "m-multiscale-07-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "52",
+  "text": "",
+  "natural": "43x52",
+  "file": "m-multiscale-08-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "53",
+  "text": "",
+  "natural": "556x39",
+  "file": "m-multiscale-09-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "54",
+  "text": "",
+  "natural": "121x52",
+  "file": "m-multiscale-10-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "55",
+  "text": "",
+  "natural": "121x52",
+  "file": "m-multiscale-11-formula.png"
+ },
+ {
+  "kind": "algo",
+  "page": 7,
+  "bi": "65",
+  "text": "Algorithm 1 Multiscale Residual Active Deep Q Network",
+  "natural": "777x906",
+  "file": "m-multiscale-12-algo.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 8,
+  "bi": "75",
+  "text": "TABLE II",
+  "natural": "777x534",
+  "file": "m-multiscale-13-table.jpg"
+ },
+ {
+  "kind": "formula",
+  "page": 8,
+  "bi": "91",
+  "text": "",
+  "natural": "609x63",
+  "file": "m-multiscale-14-formula.png"
+ },
+ {
+  "kind": "table",
+  "page": 9,
+  "bi": "92",
+  "text": "TABLE III",
+  "natural": "1572x519",
+  "file": "m-multiscale-15-table.jpg"
+ },
+ {
+  "kind": "formula",
+  "page": 9,
+  "bi": "94",
+  "text": "",
+  "natural": "266x95",
+  "file": "m-multiscale-16-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 9,
+  "bi": "95",
+  "text": "",
+  "natural": "298x76",
+  "file": "m-multiscale-17-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 9,
+  "bi": "101",
+  "text": "",
+  "natural": "266x102",
+  "file": "m-multiscale-18-formula.png"
+ },
+ {
+  "kind": "table",
+  "page": 10,
+  "bi": "106",
+  "text": "TABLE IV",
+  "natural": "777x411",
+  "file": "m-multiscale-19-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 11,
+  "bi": "112",
+  "text": "TABLE V",
+  "natural": "777x348",
+  "file": "m-multiscale-20-table.jpg"
+ }
+]

@@ -1,0 +1,130 @@
+[
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "25",
+  "text": "",
+  "natural": "582x82",
+  "file": "t-trainable-00-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "28",
+  "text": "",
+  "natural": "470x62",
+  "file": "t-trainable-01-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 3,
+  "bi": "30",
+  "text": "",
+  "natural": "87x42",
+  "file": "t-trainable-02-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "32",
+  "text": "",
+  "natural": "578x194",
+  "file": "t-trainable-03-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "34",
+  "text": "",
+  "natural": "469x72",
+  "file": "t-trainable-04-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "35",
+  "text": "",
+  "natural": "548x57",
+  "file": "t-trainable-05-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "37",
+  "text": "",
+  "natural": "545x57",
+  "file": "t-trainable-06-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "40",
+  "text": "",
+  "natural": "502x36",
+  "file": "t-trainable-07-formula.png"
+ },
+ {
+  "kind": "algo",
+  "page": 4,
+  "bi": "45",
+  "text": "ALGORITHM 1",
+  "natural": "777x819",
+  "file": "t-trainable-08-algo.jpg"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "46",
+  "text": "",
+  "natural": "340x36",
+  "file": "t-trainable-09-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "47",
+  "text": "",
+  "natural": "58x42",
+  "file": "t-trainable-10-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "48",
+  "text": "",
+  "natural": "216x62",
+  "file": "t-trainable-11-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 4,
+  "bi": "51",
+  "text": "",
+  "natural": "500x51",
+  "file": "t-trainable-12-formula.png"
+ },
+ {
+  "kind": "table",
+  "page": 5,
+  "bi": "59",
+  "text": "TABLE II",
+  "natural": "777x324",
+  "file": "t-trainable-13-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 7,
+  "bi": "71",
+  "text": "TABLE IV",
+  "natural": "777x351",
+  "file": "t-trainable-14-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 9,
+  "bi": "81",
+  "text": "TABLE VI",
+  "natural": "777x288",
+  "file": "t-trainable-15-table.jpg"
+ }
+]

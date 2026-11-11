@@ -436,6 +436,31 @@ async function attachImages(): Promise<void> {
       }, 2000)
     }
   }
+  // 图表就位后清理"图内文字"：论文插图（流程图/结构图）里的公式标签会被
+  // 文本层当成 formula 块单独裁图，表现为插图上叠一排重复小图
+  pruneFormulasInFigures()
+}
+
+/** 移除与插图区域重叠的公式块（图内标签，不是正文公式） */
+function pruneFormulasInFigures(): void {
+  const figs = [...document.querySelectorAll<HTMLElement>('#reflow-article figure.figure')]
+  if (figs.length === 0) return
+  const frects = figs.map((f) => f.getBoundingClientRect()).filter((r) => r.height > 8)
+  let removed = 0
+  document.querySelectorAll<HTMLElement>('#reflow-article .formula').forEach((el) => {
+    const r = el.getBoundingClientRect()
+    if (r.width < 2 || r.height < 2) return
+    for (const fr of frects) {
+      const vOverlap = Math.min(r.bottom, fr.bottom) - Math.max(r.top, fr.top)
+      const hOverlap = Math.min(r.right, fr.right) - Math.max(r.left, fr.left)
+      if (vOverlap > r.height * 0.6 && hOverlap > Math.min(r.width, fr.width) * 0.5) {
+        el.remove()
+        removed++
+        break
+      }
+    }
+  })
+  if (removed > 0) console.log('[paperlite] 移除图内公式标签', removed)
 }
 
 /** 表格块渲染：MuPDF 整块矩形裁图（含转曲矢量表格）
@@ -521,8 +546,8 @@ async function renderFormulasAsImages(): Promise<void> {
     const canvas = await getPageCanvasMupdf(b.page, scale)
     if (!canvas) continue
     const pageW = canvas.width / scale
-    const bandY0 = Math.max(0, Math.floor((b.rect.y0 - 2) * scale))
-    const bandY1 = Math.min(canvas.height, Math.ceil((b.rect.y1 + 2) * scale))
+    const bandY0 = Math.max(0, Math.floor(b.rect.y0 * scale))
+    const bandY1 = Math.min(canvas.height, Math.ceil(b.rect.y1 * scale))
     const bandH = Math.max(1, bandY1 - bandY0)
     const bandW = canvas.width
     const tmp = document.createElement('canvas')
@@ -534,11 +559,13 @@ async function renderFormulasAsImages(): Promise<void> {
     tctx.fillRect(0, 0, bandW, bandH)
     tctx.drawImage(canvas, 0, bandY0, bandW, bandH, 0, 0, bandW, bandH)
     const data = tctx.getImageData(0, 0, bandW, bandH).data
-    const colMid = pageW / 2
-    const looksRightCol = b.rect.x0 > colMid + 5
-    const looksLeftCol = b.rect.x1 < colMid - 5
-    const scanX0 = Math.floor((looksRightCol ? colMid + 5 : 10) * scale)
-    const scanX1 = Math.min(bandW - 1, Math.floor((looksLeftCol ? colMid - 5 : pageW - 10) * scale))
+    // 横向扫描范围 = rect ±60pt，且不得跨过页面中线（双栏页另一栏的
+    // 正文/算法体同 y 会被扫进来）。三者取交：既覆盖分式外溢，又不串栏
+    // 公式 rect 已由碎片合并得出（覆盖分式外溢），扫描只需 ±20pt 余量。
+    // 不能再按"栏中线"硬夹：宽公式会越过中线被切掉右半（实测 (1)(2)）
+    const scanPad = 10
+    const scanX0 = Math.max(0, Math.floor((b.rect.x0 - scanPad) * scale))
+    const scanX1 = Math.min(bandW - 1, Math.ceil((b.rect.x1 + scanPad) * scale))
     let minX = Number.POSITIVE_INFINITY
     let maxX = -1
     for (let py = 0; py < bandH; py++) {

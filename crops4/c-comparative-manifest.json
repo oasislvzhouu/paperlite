@@ -1,0 +1,122 @@
+[
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "18",
+  "text": "",
+  "natural": "278x82",
+  "file": "c-comparative-00-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "20",
+  "text": "",
+  "natural": "269x82",
+  "file": "c-comparative-01-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "22",
+  "text": "",
+  "natural": "229x57",
+  "file": "c-comparative-02-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "24",
+  "text": "",
+  "natural": "295x82",
+  "file": "c-comparative-03-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 5,
+  "bi": "26",
+  "text": "",
+  "natural": "373x57",
+  "file": "c-comparative-04-formula.png"
+ },
+ {
+  "kind": "table",
+  "page": 7,
+  "bi": "35",
+  "text": "TABLE 1. Online fault statistics of traction motors in locomotives and",
+  "natural": "759x327",
+  "file": "c-comparative-05-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 8,
+  "bi": "39",
+  "text": "TABLE 2. Fault type statistics: outer race of traction motor bearings.",
+  "natural": "759x486",
+  "file": "c-comparative-06-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 8,
+  "bi": "40",
+  "text": "TABLE 3. Fault type statistics: inner race of traction motor bearings.",
+  "natural": "759x489",
+  "file": "c-comparative-07-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 8,
+  "bi": "41",
+  "text": "TABLE 4. Fault type statistics: rolling elements of traction motor bearings.",
+  "natural": "759x489",
+  "file": "c-comparative-08-table.jpg"
+ },
+ {
+  "kind": "table",
+  "page": 8,
+  "bi": "42",
+  "text": "TABLE 5. Fault type statistics: cage of traction motor bearings.",
+  "natural": "759x624",
+  "file": "c-comparative-09-table.jpg"
+ },
+ {
+  "kind": "formula",
+  "page": 11,
+  "bi": "56",
+  "text": "",
+  "natural": "313x39",
+  "file": "c-comparative-10-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 11,
+  "bi": "58",
+  "text": "",
+  "natural": "65x39",
+  "file": "c-comparative-11-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 13,
+  "bi": "66",
+  "text": "",
+  "natural": "313x36",
+  "file": "c-comparative-12-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 13,
+  "bi": "67",
+  "text": "",
+  "natural": "133x36",
+  "file": "c-comparative-13-formula.png"
+ },
+ {
+  "kind": "formula",
+  "page": 13,
+  "bi": "68",
+  "text": "",
+  "natural": "309x36",
+  "file": "c-comparative-14-formula.png"
+ }
+]
