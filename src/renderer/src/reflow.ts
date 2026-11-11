@@ -1579,14 +1579,31 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
   /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体 */
   const isRefEntry = (l: Line): boolean =>
     /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)/i.test(l.text.trim())
-  const colOf = (l: Line): { x0: number; x1: number } => ({
-    x0: l.x0 >= 306 ? 306 : 20,
-    x1: l.x0 >= 306 ? 592 : l.x1 <= 306 ? 302 : 592
-  })
+  // 栏界按页面真实文本范围计算（不同期刊栏宽/页边距差异很大：
+  // 有的右栏从 297 起，写死 x>=306 会把表注判成"跨栏"→ 裁全页宽，
+  // 把左栏正文一起框进表格裁图）
+  const pageSpan = new Map<number, { minX: number; maxX: number; mid: number }>()
+  for (const l of lines) {
+    // 只统计正文带（排除页眉/页脚/页码，它们的极限 x 会把栏界算偏）
+    if (l.yTop < 50 || l.yTop > 750) continue
+    const cur = pageSpan.get(l.page)
+    if (!cur) pageSpan.set(l.page, { minX: l.x0, maxX: l.x1, mid: 0 })
+    else {
+      cur.minX = Math.min(cur.minX, l.x0)
+      cur.maxX = Math.max(cur.maxX, l.x1)
+    }
+  }
+  for (const v of pageSpan.values()) v.mid = (v.minX + v.maxX) / 2
+  const colOf = (l: Line): { x0: number; x1: number } => {
+    const span = pageSpan.get(l.page) ?? { minX: 20, maxX: 592, mid: 306 }
+    if (l.x0 >= span.mid) return { x0: span.mid + 4, x1: span.maxX + 4 }
+    if (l.x1 <= span.mid) return { x0: span.minX - 4, x1: span.mid - 4 }
+    return { x0: span.minX - 4, x1: span.maxX + 4 }
+  }
   /** 几何候选：同页、同栏、表注下方 480pt 内，按 y 升序。
    *  不能按阅读序收行 —— orderLines 会把公式碎片/算法体拆到别的"栏桶"，
    *  按序收会跨过整段正文（实测 TABLE II 因此吞掉两段正文） */
-  const candidatesBelow = (cap: Line): Line[] =>
+  const candidatesBelow = (cap: Line, band: { x0: number; x1: number }): Line[] =>
     lines
       .filter(
         (l) =>
@@ -1595,7 +1612,10 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
           l.page === cap.page &&
           l.yTop > cap.yTop + 1 &&
           l.yTop < cap.yTop + 480 &&
-          !(l.x1 < cap.x0 - 60 || l.x0 > cap.x1 + 60)
+          // 必须落在表注所在栏带内：±60pt 重叠会把邻栏正文放进候选
+          // （实测左栏 "signals in the laboratory…" 被当成表格行）
+          l.x0 >= band.x0 - 8 &&
+          l.x1 <= band.x1 + 8
       )
       .sort((a, b) => a.yTop - b.yTop)
 
@@ -1607,7 +1627,8 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     // 行内散文提及 "Table V reports the 95% CI of…"：编号后紧跟小写词
     const afterNum = cap.text.trim().replace(TABLE_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
     if (/^[a-z]/.test(afterNum)) continue
-    const below = candidatesBelow(cap)
+    const band = colOf(cap)
+    const below = candidatesBelow(cap, band)
     // IEEE 算法浮动体："TABLE N" 表注正下方是 "ALGORITHM M" → 交给算法检测
     if (below[0] && ALGO_CAPTION_RE.test(below[0].text.trim())) continue
 
@@ -1618,6 +1639,8 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       // 段间空隙（>2.4 行高）→ 表格已结束
       if (l.yTop - prevY > bodySize * 2.4) break
       if (isRefEntry(l) || isProse(l) || isSectionHeadingLine(l)) break
+      // 下一个表注（同页连续排版的 TABLE N / 表N）→ 当前表结束
+      if (TABLE_CAPTION_RE.test(l.text.trim())) break
       if (l.fontSize > bodySize * 1.5) break
       if (!isTableRow(l)) break
       if (l.yTop + Math.max(l.fontSize, 6) - cap.yTop > 340) break
@@ -1629,21 +1652,20 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     if (rows.length < 2) {
       // 兜底：表格体为转曲矢量（无文本层）。右边界取几何上最近的同栏
       // 文本行（原"到页底"会把整页裁成一张图）
-      const y1 = boundary ? Math.min(boundary.yTop - 2, cap.yTop + 480) : 792 - 26
+      const y1 = boundary ? Math.min(boundary.yTop - 2, cap.yTop + 480, 752) : 752
       if (y1 - cap.yTop < bodySize * 3) continue // 下方紧挨正文 → 不算表格
-      const c = colOf(cap)
-      cap.tableZone = { x0: c.x0, x1: c.x1, y0: cap.yTop - 2, y1 }
+      cap.tableZone = { x0: band.x0, x1: band.x1, y0: cap.yTop - 2, y1 }
       continue
     }
     const all = [cap, ...rows]
-    const c = colOf(cap)
     cap.tableZone = {
-      x0: Math.min(c.x0, Math.min(...all.map((l) => l.x0)) - 2),
-      x1: c.x1,
+      x0: Math.min(band.x0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: band.x1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
       y1: Math.min(
         boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
-        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4,
+        752
       )
     }
     for (const r of rows) consumed.add(r)
@@ -1687,12 +1709,27 @@ function isAlgoBodyLine(l: Line): boolean {
 }
 
 export function detectAlgorithms(lines: Line[], bodySize: number): void {
-  const colOf = (l: Line): { x0: number; x1: number } => ({
-    x0: l.x0 >= 306 ? 306 : 20,
-    x1: l.x0 >= 306 ? 592 : l.x1 <= 306 ? 302 : 592
-  })
+  // 栏界按页面真实文本范围计算（见 detectTableZones 同名逻辑）
+  const pageSpan = new Map<number, { minX: number; maxX: number; mid: number }>()
+  for (const l of lines) {
+    // 只统计正文带（排除页眉/页脚/页码，它们的极限 x 会把栏界算偏）
+    if (l.yTop < 50 || l.yTop > 750) continue
+    const cur = pageSpan.get(l.page)
+    if (!cur) pageSpan.set(l.page, { minX: l.x0, maxX: l.x1, mid: 0 })
+    else {
+      cur.minX = Math.min(cur.minX, l.x0)
+      cur.maxX = Math.max(cur.maxX, l.x1)
+    }
+  }
+  for (const v of pageSpan.values()) v.mid = (v.minX + v.maxX) / 2
+  const colOf = (l: Line): { x0: number; x1: number } => {
+    const span = pageSpan.get(l.page) ?? { minX: 20, maxX: 592, mid: 306 }
+    if (l.x0 >= span.mid) return { x0: span.mid + 4, x1: span.maxX + 4 }
+    if (l.x1 <= span.mid) return { x0: span.minX - 4, x1: span.mid - 4 }
+    return { x0: span.minX - 4, x1: span.maxX + 4 }
+  }
   /** 几何候选（同表格：不能按阅读序，算法体常被 orderLines 归到别的栏桶） */
-  const candidatesBelow = (cap: Line): Line[] =>
+  const candidatesBelow = (cap: Line, band: { x0: number; x1: number }): Line[] =>
     lines
       .filter(
         (l) =>
@@ -1701,7 +1738,8 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
           l.page === cap.page &&
           l.yTop > cap.yTop + 1 &&
           l.yTop < cap.yTop + 480 &&
-          !(l.x1 < cap.x0 - 60 || l.x0 > cap.x1 + 60)
+          l.x0 >= band.x0 - 8 &&
+          l.x1 <= band.x1 + 8
       )
       .sort((a, b) => a.yTop - b.yTop)
   const consumed = new Set<Line>()
@@ -1714,7 +1752,8 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     const afterNum = cap.text.trim().replace(ALGO_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
     if (/^[a-z]/.test(afterNum)) continue
 
-    const below = candidatesBelow(cap)
+    const band = colOf(cap)
+    const below = candidatesBelow(cap, band)
     const rows: Line[] = []
     const gaps: number[] = []
     let prevY = cap.yTop
@@ -1759,10 +1798,9 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
       // 矢量兜底：伪代码体转曲（无文本层）时靠表题下方的文本空隙定位
       const gap = boundary ? boundary.yTop - (cap.yTop + Math.max(cap.fontSize, 6)) : 0
       if (!boundary || gap < bodySize * 4) continue
-      const c = colOf(cap)
       cap.tableZone = {
-        x0: prevTbl && prevLine ? Math.min(c.x0, prevLine.x0) - 2 : c.x0,
-        x1: c.x1,
+        x0: prevTbl && prevLine ? Math.min(band.x0, prevLine.x0) - 2 : band.x0,
+        x1: band.x1,
         y0: (prevTbl && prevLine ? prevLine.yTop : cap.yTop) - 2,
         y1: Math.min(boundary.yTop - 2, cap.yTop + 480)
       }
@@ -1772,14 +1810,14 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     }
 
     const all: Line[] = prevTbl && prevLine ? [prevLine, cap, ...rows] : [cap, ...rows]
-    const c = colOf(cap)
     cap.tableZone = {
-      x0: Math.min(c.x0, Math.min(...all.map((l) => l.x0)) - 2),
-      x1: c.x1,
+      x0: Math.min(band.x0, Math.min(...all.map((l) => l.x0)) - 2),
+      x1: band.x1,
       y0: Math.min(...all.map((l) => l.yTop)) - 2,
       y1: Math.min(
         boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
-        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4
+        Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4,
+        752
       )
     }
     cap.tableAlgo = true

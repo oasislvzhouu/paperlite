@@ -5,7 +5,7 @@ import path from 'node:path'
 const WANT = process.argv[2] ?? 'Trainable'
 const LABEL = process.argv[3] ?? 'b0'
 const BASE = 'http://127.0.0.1:9222'
-const OUT = 'C:/Users/admin/Desktop/逆向工程/paperlite/crops2'
+const OUT = 'C:/Users/admin/Desktop/逆向工程/paperlite/crops3'
 fs.mkdirSync(OUT, { recursive: true })
 
 const targets = await (await fetch(`${BASE}/json`)).json()
