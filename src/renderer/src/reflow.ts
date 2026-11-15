@@ -27,6 +27,8 @@ export interface ReflowBlock {
   rect?: { x0: number; x1: number; y0: number; y1: number }
   /** 公式块：编号锚定的整栏区域（仅供 LLM 识别路径，不作裁图依据） */
   eqZone?: { x0: number; x1: number; y0: number; y1: number }
+  /** 几何聚类产出的公式块：矩形已最终化，禁止后续块级合并再动它 */
+  geo?: boolean
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
   /** 首行字号（脚注检测用） */
@@ -125,6 +127,9 @@ export interface Line {
   skip?: boolean
   /** 编号行的公式区（整栏宽 × 上下正文行之间），KaTeX 裁图用 */
   eqZone?: { x0: number; x1: number; y0: number; y1: number }
+  /** 几何聚类的公式簇标记行：簇内其余行已移除，本行携带最终裁图矩形。
+   *  linesToBlocks 直接产块，不再走文本缓冲区 */
+  formulaCluster?: { x0: number; x1: number; y0: number; y1: number; text: string }
 }
 
 const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
@@ -449,7 +454,10 @@ function isFormulaLine(l: Line): boolean {
   if (l.text.replace(/\s/g, '').length < 1) return false
   const t = l.text.trim()
   // 强信号 1：行尾公式编号 (N) 且散文词≤1 —— display 公式的特征
-  const proseWords = (t.match(/[A-Za-z]{4,}/g) ?? []).filter((w) => !MATH_WORD_RE.test(w))
+  // 无元音的 4+ 字母 token 是带下标的数学变量（"Wzst"/"Uzht"），不是散文词
+  const proseWords = (t.match(/[A-Za-z]{4,}/g) ?? []).filter(
+    (w) => !MATH_WORD_RE.test(w) && /[aeiouAEIOU]/.test(w)
+  )
   const hasEqNum = /\(\d{1,2}\)\s*$/.test(t)
   if (hasEqNum && proseWords.length <= 1) return true
   // 强信号 2：含等号、短行、几乎无散文词 —— 纯表达式行
@@ -590,11 +598,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   //    一个公式会被裁成两三张图，每张都缺一半
   for (let i = 0; i < lines.length; i++) {
     const a = lines[i]
-    if (a.skip || !isMathish(a)) continue
+    if (a.skip || a.formulaCluster || !isMathish(a)) continue
     const rowFrags: Line[] = [a]
     for (let j = 0; j < lines.length; j++) {
       const b = lines[j]
-      if (b === a || b.skip || b.page !== a.page) continue
+      if (b === a || b.skip || b.formulaCluster || b.page !== a.page) continue
       if (Math.abs(a.yTop - b.yTop) > 2.5) continue
       // 合并对象要么自身像数学，要么是极短符号碎片（"(11)" / "v" / "Ŷt"）。
       // 阈值放宽到 20 字符会把 "and r_u is pseudo-labels…" 这类正文碎片
@@ -623,14 +631,14 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
-    if (l.skip) continue
+    if (l.skip || l.formulaCluster) continue
     // ② 独立编号行：合并到同基线最近的公式行
     if (/^\(\s*\d{1,2}\s*\)$/.test(l.text.trim())) {
       let best = -1
       let bestDx = Number.POSITIVE_INFINITY
       for (let k = 0; k < lines.length; k++) {
         const m = lines[k]
-        if (m === l || m.page !== l.page || m.skip) continue
+        if (m === l || m.page !== l.page || m.skip || m.formulaCluster) continue
         if (Math.abs(m.yTop - l.yTop) > 3) continue
         if (!isMathish(m)) continue
         const dx = Math.min(Math.abs(m.x1 - l.x0), Math.abs(l.x1 - m.x0))
@@ -657,13 +665,32 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         Math.abs(x.yTop - l.yTop) < bodySize * 1.5 &&
         isMathish(x) &&
         !(x.x1 < l.x0 - 40 || l.x0 > x.x1 + 40)
-      if (near(lines[i - 1]) || near(lines[i + 1])) l.eqCollect = true
+      if (!inRefZone && (near(lines[i - 1]) || near(lines[i + 1]))) l.eqCollect = true
     }
   }
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
     if (l.skip) continue
+    // 几何聚类的公式簇标记行：矩形已最终化，直接产块
+    if (l.formulaCluster) {
+      flush()
+      blocks.push({
+        kind: 'formula',
+        geo: true,
+        page: l.page,
+        text: l.formulaCluster.text,
+        rect: {
+          x0: l.formulaCluster.x0,
+          x1: l.formulaCluster.x1,
+          y0: l.formulaCluster.y0,
+          y1: l.formulaCluster.y1
+        },
+        top: l.yTop,
+        firstFontSize: l.fontSize
+      })
+      continue
+    }
 
     // 孤立碎片（内容判据，不依赖字号——MuPDF 的 bbox.h 与正文接近：
     // ① 极短无标点孤立行（"t"、"u trn"）② 含希腊/数学符号的短行
@@ -756,8 +783,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       !/^[a-z]/.test(l.text.trim())
     const heading =
       headingEligible && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
+    // 文献区内不判公式：doi/卷期行被当公式裁图只产出垃圾
     const kind: 'heading' | 'paragraph' | 'formula' =
-      l.eqCollect || isFormulaLine(l)
+      !inRefZone && (l.eqCollect || isFormulaLine(l))
         ? 'formula'
         : heading
           ? 'heading'
@@ -1168,6 +1196,223 @@ export interface MupdfPageLike {
 /** MuPDF 提取层：原生行分组（精确字形定位）→ Line[]，行质量远高于
  *  pdf.js getTextContent 的碎片输出；下游管线（列锚/段落/标题/表注/
  *  公式 KaTeX/图片裁剪）全部复用 */
+/* ── 公式几何聚类（MuPDF 路径专用，替代 linesToBlocks 的公式缓冲区路径）──
+ * 背景：MuPDF 把一个公式拆成多条行（主体/分式分子分母/上下标/编号），
+ * orderLines 又把这些碎片分到不同"栏桶"，阅读序缓冲区拼块必然出错
+ * （跨式合并、切半、拖尾 —— 修了 6 条约束仍顾此失彼）。
+ * 方案：对"像数学"的行做纯几何聚类，每簇直接取 union bbox 裁图：
+ *   1) 种子 = isFormulaLine 的行；碎片 = 短符号行（编号/上下标/单符号词）
+ *   2) 同页行带（y 重叠或 |ΔyTop|≤0.5 行高）内按 x 邻接聚成行簇；
+ *      簇总宽 ≤ 栏宽×1.25（防左右栏同 y 互并）
+ *   3) 行簇纵向：bbox 垂直重叠或间隙 ≤0.3 行高 → 同一式（分式/多行栈）
+ *   4) 每簇产出一条 formulaCluster 标记行，插回原阅读序位置；簇内其余
+ *      行移出。簇必须含种子且非平凡（>4 字符），高度 ≤300pt
+ * 正文判定天然免疫：散文行不是候选，永远不会进簇 */
+export function clusterFormulas(lines: Line[], bodySize: number): void {
+  // 页面正文带中线与栏宽（判左右栏 / 限簇宽）
+  const span = new Map<number, { minX: number; maxX: number }>()
+  for (const l of lines) {
+    if (l.yTop < 50 || l.yTop > 750) continue
+    const s = span.get(l.page)
+    if (!s) span.set(l.page, { minX: l.x0, maxX: l.x1 })
+    else {
+      s.minX = Math.min(s.minX, l.x0)
+      s.maxX = Math.max(s.maxX, l.x1)
+    }
+  }
+
+  // 主字号（众数）：bodySize 是中位数，会被 7pt 说明行拉低，
+  // 用它判上下标散件太紧（6pt 散件漏判）—— 取行数最多的字号
+  const fsCount = new Map<number, number>()
+  for (const l of lines) {
+    if (l.yTop < 50 || l.yTop > 750 || l.fontSize <= 0) continue
+    const k = Math.round(l.fontSize * 2) / 2
+    fsCount.set(k, (fsCount.get(k) ?? 0) + 1)
+  }
+  let modeFs = bodySize
+  let bestN = 0
+  for (const [fs, n] of fsCount) if (n > bestN) {
+    bestN = n
+    modeFs = fs
+  }
+  const isTinyFragment = (l: Line): boolean => {
+    const t = l.text.trim()
+    if (!t || t.length > 24) return false
+    if (/^\(\s*\d{1,2}\s*\)$/.test(t)) return true // 独立编号行 "(11)"
+    if (/^\S$/.test(t)) return true // 单字符散件 "X"/"v"/"t"
+    if (l.fontSize > 0 && l.fontSize < modeFs * 0.85) return true // 上下标散件（字号小）
+    if (l.charMathRatio >= 0.12) return true // "j=1 exp" / 希腊碎片
+    // 单符号词且含非 ASCII 字母（"Ŷt"）；纯 "is"/"of" 这类正文词不算
+    if (/^\S+$/u.test(t) && /[^\x00-\x7F]/.test(t)) return true
+    return false
+  }
+
+  const lineH = (l: Line): number => Math.max(l.fontSize, 6)
+  const byPage = new Map<number, Line[]>()
+  for (const l of lines) {
+    if (l.tableZone || l.skip) continue
+    if (!byPage.get(l.page)) byPage.set(l.page, [])
+    byPage.get(l.page)!.push(l)
+  }
+
+  const memberCluster = new Map<Line, Line[]>()
+  const markerOf = new Map<Line[], Line>()
+
+  for (const [pg, plines] of byPage) {
+    // 种子排除"散文续行词开头"的行（"and ˆYt−1" 的 charMathRatio 能到 0.25，
+    // 曾是假种子）。用停用词表而非"任意小写词"——"zt ="/"dt ="/"fo =" 是
+    // 变量名开头的真公式，不能误杀
+    const PROSE_START_RE =
+      /^(and|or|where|with|for|from|the|is|are|to|in|by|as|that|this|which|while|when|such|then|it|we|its)/i
+    const seeds = plines.filter(
+      (l) => !memberCluster.has(l) && isFormulaLine(l) && !PROSE_START_RE.test(l.text.trim())
+    )
+    if ((globalThis as { __plDbg?: boolean }).__plDbg) {
+      for (const l of plines) {
+        if (l.page === 3 && l.yTop > 615 && l.yTop < 655)
+          console.log('[cand]', JSON.stringify(l.text.slice(0, 24)), 'y=' + l.yTop.toFixed(0), 'fs=' + l.fontSize.toFixed(1), 'bs=' + bodySize, 'fsOk=' + (l.fontSize > 0 && l.fontSize < bodySize * 0.78), 'cmr=' + l.charMathRatio, 'seed=' + seeds.includes(l), 'frag=' + isTinyFragment(l))
+      }
+    }
+    if (seeds.length === 0) continue
+    const seedSet = new Set(seeds)
+    const frags = plines.filter((l) => !seedSet.has(l) && !memberCluster.has(l) && isTinyFragment(l))
+    if (frags.length === 0 && seeds.length === 0) continue
+
+    // 1) 行带
+    const cand = [...seeds, ...frags].sort((a, b) => a.yTop - b.yTop || a.x0 - b.x0)
+    const bands: Line[][] = []
+    let cur: Line[] = []
+    for (const l of cand) {
+      if (cur.length === 0) {
+        cur = [l]
+        continue
+      }
+      const last = cur[cur.length - 1]
+      const overlap = Math.min(last.yTop + lineH(last), l.yTop + lineH(l)) - Math.max(last.yTop, l.yTop)
+      if (overlap > 0 || Math.abs(l.yTop - last.yTop) <= bodySize * 0.5) cur.push(l)
+      else {
+        bands.push(cur)
+        cur = [l]
+      }
+    }
+    if (cur.length) bands.push(cur)
+
+    // 2) 行带内按 x 邻接拆行簇
+    const sp = span.get(pg) ?? { minX: 20, maxX: 592 }
+    const mid = (sp.minX + sp.maxX) / 2
+    const colW = Math.max(120, mid - sp.minX)
+    const rows: Line[][] = []
+    for (const band of bands) {
+      band.sort((a, b) => a.x0 - b.x0)
+      let g: Line[] = []
+      for (const l of band) {
+        if (!g.length) {
+          g = [l]
+          continue
+        }
+        const gx1 = Math.max(...g.map((m) => m.x1))
+        const newW = Math.max(gx1, l.x1) - Math.min(g[0].x0, l.x0)
+        const gap = l.x0 > gx1 ? l.x0 - gx1 : 0
+        if (gap > 160 || newW > colW * 1.25) {
+          rows.push(g)
+          g = [l]
+        } else g.push(l)
+      }
+      if (g.length) rows.push(g)
+    }
+
+    // 3) 纵向合并（bbox 重叠或间隙 ≤0.3 行高）
+    rows.sort((a, b) => Math.min(...a.map((l) => l.yTop)) - Math.min(...b.map((l) => l.yTop)))
+    const clusters: Line[][] = []
+    for (const r of rows) {
+      if (!clusters.length) {
+        clusters.push([...r])
+        continue
+      }
+      const c = clusters[clusters.length - 1]
+      const cy1 = Math.max(...c.map((l) => l.yTop + lineH(l)))
+      const ry0 = Math.min(...r.map((l) => l.yTop))
+      // 横向必须重叠：双栏页左右两栏同 y 的行簇是两个公式，
+      // 只按 y 合并会拼成横跨两栏的大簇（实测 (10)+(13)）
+      const cx0 = Math.min(...c.map((l) => l.x0))
+      const cx1 = Math.max(...c.map((l) => l.x1))
+      const rx0 = Math.min(...r.map((l) => l.x0))
+      const rx1 = Math.max(...r.map((l) => l.x1))
+      // 0.7 行高：Σ 上下限与行内式换行的 gap≈4pt 都要并上；正文行距 ~1.5 行高不会误并
+      if (ry0 <= cy1 + bodySize * 0.7 && Math.min(cx1, rx1) > Math.max(cx0, rx0)) c.push(...r)
+      else clusters.push([...r])
+    }
+
+    if ((globalThis as { __plDbg?: boolean }).__plDbg && pg === 4) {
+      for (const r of rows) console.log('[row]', r.map((l) => l.x0.toFixed(0) + '-' + l.x1.toFixed(0) + '@' + l.yTop.toFixed(0)).join(' '), '||', r.map((l) => JSON.stringify(l.text.slice(0, 10))).join(','))
+      console.log('[clusters]', clusters.length)
+    }
+    // 4) 成簇条件 + 标记行
+    for (const cl of clusters) {
+      if (cl.some((l) => memberCluster.has(l))) continue
+      const text = cl
+        .map((l) => l.text)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if ((globalThis as { __plDbg?: boolean }).__plDbg && pg === 4)
+        console.log('[cl]', cl.some((l) => seedSet.has(l)) ? 'seed' : 'noseed', 'h=' + (Math.max(...cl.map((l) => l.yTop + lineH(l))) - Math.min(...cl.map((l) => l.yTop))).toFixed(0), 'text=' + JSON.stringify(text.slice(0, 50)))
+      if (!cl.some((l) => seedSet.has(l))) continue // 无种子 → 可能是纯碎片群
+      if (text.replace(/\s/g, '').length <= 4) continue // 平凡簇
+      const fs0 = Math.max(...cl.map((l) => l.fontSize || 8))
+      const x0 = Math.min(...cl.map((l) => l.x0))
+      const x1 = Math.max(...cl.map((l) => l.x1))
+      const yTop0 = Math.min(...cl.map((l) => l.yTop))
+      const y1 = Math.max(...cl.map((l) => l.yTop + lineH(l)))
+      if (y1 - yTop0 > 300) continue // 异常高度（误并），放弃聚类
+      const marker: Line = {
+        page: pg,
+        yTop: yTop0,
+        x0,
+        x1,
+        fontSize: fs0,
+        text,
+        html: text.replace(/[&<>"]/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]
+        ),
+        mathRatio: 0,
+        charMathRatio: 1,
+        shortFragRatio: 0,
+        fragCount: 1,
+        wordCount: text.split(/\s+/).filter(Boolean).length,
+        eqNumbered: cl.some((l) => l.eqNumbered),
+        formulaCluster: {
+          x0,
+          x1,
+          // 上留 0.2 字高（多了蹭上一行字头），下留 0.5 字高（分式分母外溢）
+          y0: yTop0 - Math.max(2, fs0 * 0.2),
+          y1: y1 + Math.max(4, fs0 * 0.5),
+          text
+        }
+      }
+      markerOf.set(cl, marker)
+      for (const l of cl) memberCluster.set(l, cl)
+    }
+  }
+
+  if (markerOf.size === 0) return
+  // 原地重写：簇的首个成员位置换成标记行，其余成员移除（保阅读序）
+  const out: Line[] = []
+  const emitted = new Set<Line[]>()
+  for (const l of lines) {
+    const cl = memberCluster.get(l)
+    if (!cl) {
+      out.push(l)
+      continue
+    }
+    if (emitted.has(cl)) continue
+    emitted.add(cl)
+    out.push(markerOf.get(cl)!)
+  }
+  lines.length = 0
+  lines.push(...out)
+}
+
 export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
   const imgRects: Array<{ page: number; x0: number; y0: number; x1: number; y1: number }> = []
@@ -1196,10 +1441,34 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
       const ls = b.lines ?? []
       return ls.length === 1 && /^\[\s*\d{1,3}\s*\]$/.test((ls[0].text ?? '').trim())
     }
+    // 图内标签的判据改为"几何上落在图像块内"：原"页内 ≥4 个微块整组跳过"
+    // 会把公式碎片（"rt = R"/"Yv, Ŷt"/"(11)" 宽都 <45pt）当图表标签删掉，
+    // 聚类时公式缺胳膊少腿
+    const inImageRect = (
+      b: { type: string; bbox?: { x: number; y: number; w: number; h: number } }
+    ): boolean => {
+      if (!b.bbox) return false
+      const cx = b.bbox.x + b.bbox.w / 2
+      const cy = b.bbox.y + b.bbox.h / 2
+      return imgRects.some(
+        (r) => r.page === p + 1 && cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1
+      )
+    }
     const tinyBlocks = stext.blocks.filter(
-      (b: { type: string; bbox: { w: number }; lines?: Array<{ text?: string }> }) => b.type === 'text' && b.bbox.w < 45 && (b.lines ?? []).every((l: { text?: string }) => (l.text ?? '').length <= 30) && !isCitMarker(b)
+      (
+        b: {
+          type: string
+          bbox: { x: number; y: number; w: number; h: number }
+          lines?: Array<{ text?: string }>
+        }
+      ) =>
+        b.type === 'text' &&
+        b.bbox.w < 45 &&
+        (b.lines ?? []).every((l: { text?: string }) => (l.text ?? '').length <= 30) &&
+        !isCitMarker(b) &&
+        inImageRect(b)
     )
-    const skipTiny = tinyBlocks.length >= 4 ? new Set(tinyBlocks) : null
+    const skipTiny = tinyBlocks.length > 0 ? new Set(tinyBlocks) : null
     const lines: Line[] = []
     for (const block of stext.blocks) {
       if (skipTiny?.has(block)) continue
@@ -1250,6 +1519,13 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   reorderReferenceHeading(ordered)
   detectTableZones(ordered, bodySize)
   detectAlgorithms(ordered, bodySize)
+  if ((globalThis as { __plDbg?: boolean }).__plDbg) {
+    for (const l of ordered)
+      if (l.page === 4 && ((l.yTop > 100 && l.yTop < 120) || (l.yTop > 360 && l.yTop < 380) || (l.yTop > 590 && l.yTop < 615)))
+        console.log('[pre]', JSON.stringify(l.text.slice(0, 20)), 'y=' + l.yTop.toFixed(0), 'skip=' + !!l.skip, 'tz=' + !!l.tableZone, 'eqC=' + !!l.eqCollect, 'seed=' + isFormulaLine(l))
+  }
+  // 公式走几何聚类（不走文本缓冲区）；表格/算法/正文路径不变
+  clusterFormulas(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
   mergeFormulaClusters(blocks, bodySize)
   mergeOrphanFragments(blocks)
@@ -1443,6 +1719,10 @@ function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
   while (i < blocks.length) {
     const a = blocks[i - 1]
     const b = blocks[i]
+    if (a.geo || b.geo) {
+      i++
+      continue
+    }
     if (a.top === undefined || b.top === undefined || a.page !== b.page) {
       i++
       continue
@@ -1504,7 +1784,7 @@ function mergeFormulaDebris(blocks: ReflowBlock[], bodySize: number): void {
   }
   for (let i = blocks.length - 2; i >= 0; i--) {
     const f = blocks[i]
-    if (f.kind !== 'formula') continue
+    if (f.kind !== 'formula' || f.geo) continue
     // 迭代吸收公式后的连续碎片段（可能多条）
     let j = i + 1
     let absorbed = 0
@@ -1721,6 +2001,8 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     for (const r of rows) consumed.add(r)
   }
   if (consumed.size > 0) {
+    if ((globalThis as { __plDbg?: boolean }).__plDbg)
+      for (const l of consumed) if (l.page === 4 && l.yTop > 330) console.log('[tbl-eat]', JSON.stringify(l.text.slice(0, 22)), 'y=' + l.yTop.toFixed(0))
     for (let k = lines.length - 1; k >= 0; k--) if (consumed.has(lines[k])) lines.splice(k, 1)
   }
 }
