@@ -467,6 +467,9 @@ function isFormulaLine(l: Line): boolean {
   // 含 2 个以上长英文单词 → 是名词列表不是公式
   const longWords = l.text.match(/[A-Za-z]{4,}/g) ?? []
   if (longWords.length >= 2) return false
+  // 句子片段不是公式：以句号结尾、无关系符、无编号的短行
+  // （"t −1." 是正文续行，含 − 号也能让 charMathRatio 爆掉）
+  if (/\.$/.test(t) && eqCount === 0 && !hasEqNum) return false
   if (l.mathRatio >= 0.5) return true
   if (l.charMathRatio >= 0.25) return true
   if (l.eqNumbered && l.charMathRatio >= 0.02) return true
@@ -517,6 +520,80 @@ export function estimateLeading(lines: Line[], bodySize: number): number {
 }
 
 const LIST_ITEM_RE = /^\(?([0-9]{1,2}|[a-zA-Z])[).]\s+\S/
+
+/** 数学记号行判据（行合并与公式聚类共用） */
+export const isMathishLine = (l: Line): boolean =>
+  l.eqNumbered ||
+  /[=\u2295\u2218\u2207\u2190\u2192]/.test(l.text) ||
+  l.charMathRatio >= 0.1 ||
+  l.shortFragRatio >= 0.5
+
+/** 同一基线的视觉整行合并：MuPDF 会按字体变化把**一条视觉行**拆成多条
+ *  独立行（"Our optimized Transformer (L" / "=" / "10 layers, H" / "="；
+ *  "rt = R" / "Yv, Ŷt" / "(11)"）。
+ *  必须在表格检测与公式聚类**之前**执行：
+ *   ① 行内括号数学（"(L = 10 layers, H = 8 …)"）合并回散文行后不再被当成
+ *      display 公式裁图（此前 rect 从第一个 "=" 起算，把左侧文字切掉）；
+ *   ② 公式碎片合并后 rect 完整（此前每张裁图缺一半）；
+ *   ③ 聚类看到的是整行，不会把行内公式孤立成簇。
+ *  合并条件：同页 |Δy| ≤ 2.5pt、横向间距 ≤ 2.5 行高，且该行**至少含一个
+ *  数学记号**（纯散文不合并：把表格单元格拼成一行会破坏表格行判据）。 */
+export function mergeVisualLines(lines: Line[], bodySize: number): void {
+  const byPage = new Map<number, Line[]>()
+  for (const l of lines) {
+    if (l.skip || l.formulaCluster) continue
+    const arr = byPage.get(l.page)
+    if (arr) arr.push(l)
+    else byPage.set(l.page, [l])
+  }
+  for (const pageLines of byPage.values()) {
+    // 以 y 排序后扫描：同一视觉行的碎片 y 相差 ≤2.5pt
+    const sorted = [...pageLines].sort((a, b) => a.yTop - b.yTop || a.x0 - b.x0)
+    const groups: Line[][] = []
+    for (const l of sorted) {
+      const g = groups[groups.length - 1]
+      if (g && Math.abs(l.yTop - g[0].yTop) <= 2.5) g.push(l)
+      else groups.push([l])
+    }
+    for (const group of groups) {
+      if (group.length < 2) continue
+      if (!group.some((l) => isMathishLine(l))) continue
+      group.sort((a, b) => a.x0 - b.x0)
+      const runs: Line[][] = []
+      let run: Line[] = [group[0]]
+      for (let k = 1; k < group.length; k++) {
+        const prev = run[run.length - 1]
+        const gap = group[k].x0 - prev.x1
+        if (gap > Math.max(18, bodySize * 2.5)) {
+          runs.push(run)
+          run = [group[k]]
+        } else run.push(group[k])
+      }
+      runs.push(run)
+      for (const r of runs) {
+        if (r.length < 2) continue
+        const head = r[0]
+        head.text = r
+          .map((f) => f.text.trim())
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        head.html = head.text
+        head.x0 = Math.min(...r.map((f) => f.x0))
+        head.x1 = Math.max(...r.map((f) => f.x1))
+        head.eqNumbered = r.some((f) => f.eqNumbered)
+        head.wordCount = head.text.split(/\s+/).filter(Boolean).length
+        head.fragCount = head.wordCount
+        const chars = head.text.replace(/\s/g, '')
+        let mc = 0
+        for (const ch of chars) if (MATH_CHAR_RE.test(ch)) mc++
+        head.charMathRatio = chars.length ? mc / chars.length : 0
+        for (let k = 1; k < r.length; k++) r[k].skip = true
+      }
+    }
+  }
+}
 
 /** 行流 → 语义块（标题/段落/公式/图片） */
 export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
@@ -593,41 +670,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     x.charMathRatio >= 0.1 ||
     x.shortFragRatio >= 0.5
 
-  // ⓪ 同一基线的公式碎片合并：MuPDF 把 "rt = R" / "Yv, Ŷt" / "(11)" 拆成
-  //    三条独立行（pdf.js 路径有 fragsToLines 做同样的事）。不合并的话
-  //    一个公式会被裁成两三张图，每张都缺一半
-  for (let i = 0; i < lines.length; i++) {
-    const a = lines[i]
-    if (a.skip || a.formulaCluster || !isMathish(a)) continue
-    const rowFrags: Line[] = [a]
-    for (let j = 0; j < lines.length; j++) {
-      const b = lines[j]
-      if (b === a || b.skip || b.formulaCluster || b.page !== a.page) continue
-      if (Math.abs(a.yTop - b.yTop) > 2.5) continue
-      // 合并对象要么自身像数学，要么是极短符号碎片（"(11)" / "v" / "Ŷt"）。
-      // 阈值放宽到 20 字符会把 "and r_u is pseudo-labels…" 这类正文碎片
-      // 并进公式块 → 裁图带出标题/正文
-      if (!isMathish(b) && b.text.trim().length > 6) continue
-      // 只合并紧邻碎片：两列之间的间距远大于 2.5 行高
-      let best = Number.POSITIVE_INFINITY
-      for (const f of rowFrags) {
-        const gap = b.x0 > f.x1 ? b.x0 - f.x1 : f.x0 > b.x1 ? f.x0 - b.x1 : 0
-        if (gap < best) best = gap
-      }
-      if (best > Math.max(18, bodySize * 2.5)) continue
-      rowFrags.push(b)
-    }
-    if (rowFrags.length < 2) continue
-    rowFrags.sort((p, q) => p.x0 - q.x0)
-    a.text = rowFrags.map((f) => f.text).join(' ').replace(/\s+/g, ' ').trim()
-    a.html = a.text
-    a.x0 = Math.min(...rowFrags.map((f) => f.x0))
-    a.x1 = Math.max(...rowFrags.map((f) => f.x1))
-    a.eqNumbered = rowFrags.some((f) => f.eqNumbered)
-    a.wordCount = a.text.split(/\s+/).filter(Boolean).length
-    a.fragCount = a.wordCount
-    for (const f of rowFrags) if (f !== a) f.skip = true
-  }
+  // ⓪ 同一基线的视觉整行合并（见 mergeVisualLines：行内数学与公式碎片
+  //    都必须在分类前拼回整行）
+  mergeVisualLines(lines, bodySize)
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
@@ -665,7 +710,12 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         Math.abs(x.yTop - l.yTop) < bodySize * 1.5 &&
         isMathish(x) &&
         !(x.x1 < l.x0 - 40 || l.x0 > x.x1 + 40)
-      if (!inRefZone && (near(lines[i - 1]) || near(lines[i + 1]))) l.eqCollect = true
+      // 句子片段（"t −1."）不标公式：含 − 号会让数学占比爆掉，
+      // 却被邻近的公式行"带"成 eqCollect
+      const fragText = l.text.trim()
+      const sentenceFrag =
+        /\.$/.test(fragText) && !/[=\u2248\u2264\u2265\u2295\u2218\u2207\u2190\u2192]/.test(fragText) && !l.eqNumbered
+      if (!inRefZone && !sentenceFrag && (near(lines[i - 1]) || near(lines[i + 1]))) l.eqCollect = true
     }
   }
 
@@ -783,9 +833,13 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       !/^[a-z]/.test(l.text.trim())
     const heading =
       headingEligible && (isHeadingSize(l.fontSize) || isSectionHeadingLine(l))
-    // 文献区内不判公式：doi/卷期行被当公式裁图只产出垃圾
+    // 文献区内不判公式：doi/卷期行被当公式裁图只产出垃圾。
+    // 句子片段（"t −1."）同理：含 − 号会让数学占比爆掉
+    const kindText = l.text.trim()
+    const kindIsFrag =
+      /\.$/.test(kindText) && !/[=\u2248\u2264\u2265\u2295\u2218\u2207\u2190\u2192]/.test(kindText) && !l.eqNumbered
     const kind: 'heading' | 'paragraph' | 'formula' =
-      !inRefZone && (l.eqCollect || isFormulaLine(l))
+      !inRefZone && !kindIsFrag && (l.eqCollect || isFormulaLine(l))
         ? 'formula'
         : heading
           ? 'heading'
@@ -1263,7 +1317,7 @@ export function clusterFormulas(lines: Line[], bodySize: number): void {
     // 曾是假种子）。用停用词表而非"任意小写词"——"zt ="/"dt ="/"fo =" 是
     // 变量名开头的真公式，不能误杀
     const PROSE_START_RE =
-      /^(and|or|where|with|for|from|the|is|are|to|in|by|as|that|this|which|while|when|such|then|it|we|its)/i
+      /^(and|or|where|with|for|from|the|is|are|to|in|by|as|that|this|which|while|when|such|then|it|we|its)(?![A-Za-z])/i
     const seeds = plines.filter(
       (l) => !memberCluster.has(l) && isFormulaLine(l) && !PROSE_START_RE.test(l.text.trim())
     )
@@ -1359,6 +1413,12 @@ export function clusterFormulas(lines: Line[], bodySize: number): void {
         console.log('[cl]', cl.some((l) => seedSet.has(l)) ? 'seed' : 'noseed', 'h=' + (Math.max(...cl.map((l) => l.yTop + lineH(l))) - Math.min(...cl.map((l) => l.yTop))).toFixed(0), 'text=' + JSON.stringify(text.slice(0, 50)))
       if (!cl.some((l) => seedSet.has(l))) continue // 无种子 → 可能是纯碎片群
       if (text.replace(/\s/g, '').length <= 4) continue // 平凡簇
+      // 簇级否决：以散文连接词开头的簇是句子续行（"and ˆYt−1 is …"），
+      // 其中的 "t −1." 这类纯符号续行会被误判成种子。真公式不会以
+      // and/where/for/the 开头
+      if (PROSE_START_RE.test(text)) continue
+      // 簇级否决：只有符号、没有关系符的短句段（"t −1."）不是公式
+      if (!/[=\u2248\u2264\u2265\u2295\u2218\u2207\u2190\u2192]/.test(text) && text.replace(/\s/g, '').length < 6) continue
       const fs0 = Math.max(...cl.map((l) => l.fontSize || 8))
       const x0 = Math.min(...cl.map((l) => l.x0))
       const x1 = Math.max(...cl.map((l) => l.x1))
@@ -1517,13 +1577,10 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   const ordered: Line[] = []
   perPage.forEach((p, i) => ordered.push(...orderLines(kept[i], p.width)))
   reorderReferenceHeading(ordered)
+  // 视觉整行合并必须早于表格检测与公式聚类（见 mergeVisualLines 注释）
+  mergeVisualLines(ordered, bodySize)
   detectTableZones(ordered, bodySize)
   detectAlgorithms(ordered, bodySize)
-  if ((globalThis as { __plDbg?: boolean }).__plDbg) {
-    for (const l of ordered)
-      if (l.page === 4 && ((l.yTop > 100 && l.yTop < 120) || (l.yTop > 360 && l.yTop < 380) || (l.yTop > 590 && l.yTop < 615)))
-        console.log('[pre]', JSON.stringify(l.text.slice(0, 20)), 'y=' + l.yTop.toFixed(0), 'skip=' + !!l.skip, 'tz=' + !!l.tableZone, 'eqC=' + !!l.eqCollect, 'seed=' + isFormulaLine(l))
-  }
   // 公式走几何聚类（不走文本缓冲区）；表格/算法/正文路径不变
   clusterFormulas(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
@@ -1719,23 +1776,31 @@ function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
   while (i < blocks.length) {
     const a = blocks[i - 1]
     const b = blocks[i]
-    if (a.geo || b.geo) {
-      i++
-      continue
-    }
     if (a.top === undefined || b.top === undefined || a.page !== b.page) {
       i++
       continue
     }
     // gap >= 0：同一基线的拆分对（gap=0）与紧邻多行公式（gap≤18）都合并；
-    // gap < 0 是阅读序回跳（换栏/换页），不合并
+    // gap < 0 是阅读序回跳（换栏/换页），不合并。
+    // 几何簇（geo）吸收相邻公式块时放宽到 32pt（多行公式的行距级）：
+    // 簇可能只圈到括号/σ，细长的公式主体行需要并回来才是完整一张图
     const gap = b.top - a.top
-    if (gap < 0 || gap > 18) {
+    const maxGap = a.geo || b.geo ? 32 : 18
+    if (gap < 0 || gap > maxGap) {
       i++
       continue
     }
     // 1) formula + formula（同行拆分/紧邻多行公式）→ 拼接
     if (a.kind === 'formula' && b.kind === 'formula') {
+      // geo 块只与公式合并，且并集不得跨栏（>0.9 页宽即视为两栏内容）
+      const unionW =
+        a.rect && b.rect
+          ? Math.max(a.rect.x1, b.rect.x1) - Math.min(a.rect.x0, b.rect.x0)
+          : 0
+      if ((a.geo || b.geo) && unionW > 540) {
+        i++
+        continue
+      }
       a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
       if (b.html) a.html = `${a.html ?? ''} ${b.html}`.trim()
       if (b.rect && a.rect) {
@@ -1751,9 +1816,11 @@ function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
     }
     // 2) formula + 短碎片段（≤40 字符、非正文、非编号行）→ 并入公式。
     //    排除章节标题（"R. Formulation of the MDP" 26 字符，曾被并入公式
-    //    并把裁图拉宽到整页）与冒号结尾的引导句
+    //    并把裁图拉宽到整页）与冒号结尾的引导句。
+    //    geo 块不吸附段落：它的矩形已由聚类最终化
     if (
       a.kind === 'formula' &&
+      !a.geo &&
       b.kind === 'paragraph' &&
       !b.role &&
       b.text.length <= 40 &&
@@ -1908,7 +1975,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
   }
   /** 参考文献条目（"[1] D. Xiaobing…" / "REFERENCES"）：绝不属于表格体 */
   const isRefEntry = (l: Line): boolean =>
-    /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)/i.test(l.text.trim())
+    /^\[\s*\d{1,3}\s*\]/.test(l.text.trim()) || /^(references?|bibliography|参考文献)(?![A-Za-z])/i.test(l.text.trim())
   // 栏界按页面真实文本范围计算（不同期刊栏宽/页边距差异很大：
   // 有的右栏从 297 起，写死 x>=306 会把表注判成"跨栏"→ 裁全页宽，
   // 把左栏正文一起框进表格裁图）
