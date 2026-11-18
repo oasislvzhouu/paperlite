@@ -450,13 +450,23 @@ function renderReflow(): void {
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
       const roleCls = `${b.role ? ` ${b.role}` : ''}${b.fontKind ? ` ff-${b.fontKind}` : ''}${b.cross ? ` cross-${b.cross}` : ''}`
-      // 标题字号用 PDF 原始比例（em），保留原文的层级视觉差
-      const fs = b.fontScale ? ` style="font-size:${(b.fontScale * (lvl === 1 ? 1.35 : 1)).toFixed(2)}em"` : ''
-      parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}"${fs}>${body}</h${lvl}>`)
+      // 标题字号用 PDF 原始比例（em），保留原文的层级视觉差；
+      // 首页标题/作者按原文对齐：靠栏左缘的（Elsevier 左对齐版式）不再居中
+      const flushLeft = (b.role === 'title' || b.role === 'authors') && (b.left ?? 999) <= 60
+      const fs = [
+        b.fontScale ? `font-size:${(b.fontScale * (lvl === 1 ? 1.35 : 1)).toFixed(2)}em` : '',
+        flushLeft ? 'text-align:left' : ''
+      ]
+        .filter(Boolean)
+        .join(';')
+      const fsAttr = fs ? ` style="${fs}"` : ''
+      parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}"${fsAttr}>${body}</h${lvl}>`)
     } else {
       const roleCls = `${b.role ? ` ${b.role}` : ''}${b.fontKind ? ` ff-${b.fontKind}` : ''}${b.cross ? ` cross-${b.cross}` : ''}`
       const crossAttr = b.cross ? ` data-cross="${b.cross}"` : ''
-      parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}"${crossAttr}>${body}</p>`)
+      const flushLeft = b.role === 'authors' && (b.left ?? 999) <= 60
+      const alignAttr = flushLeft ? ' style="text-align:left"' : ''
+      parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}"${crossAttr}${alignAttr}>${body}</p>`)
     }
   })
   article.innerHTML = parts.join('\n')
