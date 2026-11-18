@@ -27,4 +27,6 @@ export interface OpenReadingResult {
   url: string
   lastPage: number
   pageCount: number | null
+  /** 文件大小（字节），论文信息弹窗展示用 */
+  sizeBytes: number
 }

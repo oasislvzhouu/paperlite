@@ -230,10 +230,21 @@ export async function recognizeFormula(dataUrl: string): Promise<string> {
     .replace(/¿/g, '')
     .trim()
 }
+/** 译文目标语言（对标 Scholaread 的 ReaderTargetLanguageSelect） */
+export const LANG_NAMES: Record<string, string> = {
+  'zh-CN': '简体中文',
+  'zh-TW': '繁體中文',
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어'
+}
+
 export async function translateParagraphs(
   texts: string[],
+  lang: string = 'zh-CN',
   onProgress?: (done: number, total: number) => void
 ): Promise<string[]> {
+  const langName = LANG_NAMES[lang] ?? LANG_NAMES['zh-CN']
   const out: string[] = new Array(texts.length).fill('')
   const BATCH = 6
   const jobs: Array<{ start: number; batch: string[] }> = []
@@ -256,8 +267,8 @@ export async function translateParagraphs(
         .map((t, i) => `[[${job.start + i}]]${t}`)
         .join('\n\n')
       const prompt =
-        '你是专业的学术文献翻译。下面有多个带 [[N]] 序号标记的英文段落，' +
-        '把每段翻译成准确、流畅的简体中文。输出格式：每条译文以原序号标记 [[N]] 开头' +
+        '你是专业的学术文献翻译。下面有多个带 [[N]] 序号标记的段落，' +
+        `把每段翻译成准确、流畅的${langName}。输出格式：每条译文以原序号标记 [[N]] 开头` +
         '（N 与输入一致，顺序不限），仅输出译文本身，不要解释。' +
         '保留数学符号与变量（如 x、α、Q-learning 不译）、保留引用标记（如 [8]、Fig. 2）。\n\n' +
         tagged
@@ -282,4 +293,48 @@ export async function translateParagraphs(
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker))
   return out
+}
+
+/** 解释一段公式或图表（视觉模型，输出中文说明） */
+export async function explainImage(dataUrl: string, kind: 'formula' | 'figure'): Promise<string> {
+  const m = /^data:image\/(png|jpeg);base64,(.+)$/.exec(dataUrl)
+  if (!m) throw new Error('图片格式不支持（需 PNG/JPEG dataURL）')
+  const { llm } = loadSettings()
+  if (!llm.apiKey) throw new Error('未配置 API Key')
+  const mediaType = m[1] === 'png' ? 'image/png' : 'image/jpeg'
+  const ask =
+    kind === 'formula'
+      ? '这是一篇学术论文中的公式。请用简体中文回答：1) 它表达的是什么关系/含义；2) 各个符号分别代表什么；3) 它在论文中的作用。直接给结论，200 字以内，不要客套话。'
+      : '这是一篇学术论文中的图表。请用简体中文回答：1) 它展示了什么；2) 横纵轴或各元素代表什么；3) 作者想说明的主要结论。直接给结论，200 字以内，不要客套话。'
+  const res = await fetch(`${llm.baseUrl.replace(/\/$/, '')}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': llm.apiKey,
+      authorization: `Bearer ${llm.apiKey}`,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: llm.model,
+      max_tokens: 1024,
+      thinking: { type: 'disabled' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: m[2] } },
+            { type: 'text', text: ask }
+          ]
+        }
+      ]
+    }),
+    signal: AbortSignal.timeout(90_000)
+  })
+  const data = (await res.json()) as AnthropicResponse
+  if (!res.ok || data.error) throw new Error(`LLM ${res.status}: ${data.error?.message ?? res.statusText}`)
+  return (data.content ?? [])
+    .filter((c) => c.type === 'text')
+    .map((c) => c.text ?? '')
+    .join('')
+    .trim()
 }

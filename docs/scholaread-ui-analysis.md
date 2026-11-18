@@ -55,8 +55,19 @@ Montserrat / JetBrains Mono / Noto Sans Mono / Arial + 中文书法字体。
 | 图表 | `cursor: zoom-in` | **点击灯箱放大**（再点切原始像素） |
 | 表注重复 | — | 裁图内重复文字自动剔除 |
 
+## 交互层（main-*.js 挖掘）
+
+| 其实现 | 说明 | PaperLite 现状 |
+|---|---|---|
+| `ReaderButtonFormulaToolbar` / `ReaderButtonImageToolbar` | 给每个 `.no-reflow-formula` / `.no-reflow-image` 注入悬浮按钮（问 AI） | ✅ 悬浮条：放大/复制/下载/**AI 解释** |
+| `ReaderPopupPaperInfo` | 论文信息：阅读时长、进度、导出 BibTeX/EndNote | ✅ 已实现（含累计阅读时长） |
+| `ReaderTargetLanguageSelect` | 译文目标语言 | ✅ 简/繁/英/日/韩 |
+| `ReaderMajorPointsPanel` | AI 提取论文要点（objective/method/novelty/result）并可按类型筛选 | ⛔ 未做（需 LLM 结构化抽取 + 面板） |
+| `ReaderPopupExportPdf` | 导出带高亮/笔记的 PDF | ⛔ 未做（需注释写入层） |
+| `ReaderPopupAIAnswer` | 划词 AI 问答（浮层/侧栏两种模式） | ⛔ 未做 |
+
 ## 已知未做
 
-- 引用角标转链接（需解析引用文本来做跳转）
-- 右侧 AI/笔记侧栏（当前笔记走弹窗）
-- 多色高亮批注面板（现为黄/绿/蓝三色）
+- AI 要点面板（MajorPoints）与划词 AI 问答
+- 导出带批注的 PDF
+- 引用角标在原文模式下的点击（重排模式已支持）

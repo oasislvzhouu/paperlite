@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { getDb, libraryDir, thumbPath } from './db'
-import { llmStatus, parsePageFormulas, recognizeFormula, translateParagraphs } from './llm'
+import { explainImage, llmStatus, parsePageFormulas, recognizeFormula, translateParagraphs } from './llm'
 import type { ImportResult, OpenReadingResult, ReadingMeta } from '../shared/types'
 
 const isPdf = (name: string): boolean => /\.pdf$/i.test(name)
@@ -112,7 +112,8 @@ export function registerIpc(): void {
       title: row.title,
       url: `paperlite://pdf/${row.id}`,
       lastPage: row.last_page,
-      pageCount: row.page_count
+      pageCount: row.page_count,
+      sizeBytes: row.size_bytes
     }
   })
 
@@ -139,12 +140,14 @@ export function registerIpc(): void {
 
   ipcMain.handle('llm:status', () => llmStatus())
 
-  ipcMain.handle('translate:paragraphs', async (evt, texts: string[]): Promise<string[]> => {
+  ipcMain.handle(
+    'translate:paragraphs',
+    async (evt, texts: string[], lang: string = 'zh-CN'): Promise<string[]> => {
     if (!Array.isArray(texts) || texts.length === 0) return []
     console.log(`[paperlite-main] 翻译请求：${texts.length} 段`)
     interactiveTranslationInFlight = true
     try {
-      return await translateParagraphs(texts, (done, total) => {
+      return await translateParagraphs(texts, lang, (done, total) => {
         try {
           evt.sender.send('translation:progress', { done, total, kind: 'interactive' })
         } catch {
@@ -184,6 +187,12 @@ export function registerIpc(): void {
       const list = await parsePageFormulas(dataUrl)
       return JSON.stringify(list)
     }
+  )
+
+  ipcMain.handle(
+    'vision:explain',
+    (_e, dataUrl: string, kind: 'formula' | 'figure'): Promise<string> =>
+      explainImage(dataUrl, kind === 'figure' ? 'figure' : 'formula')
   )
 
   ipcMain.handle('formula:recognize', async (_e, dataUrl: string): Promise<string> => {
@@ -243,11 +252,14 @@ export function registerIpc(): void {
 
   const shaOf = (t: string): string => createHash('sha256').update(t).digest('hex')
 
-  ipcMain.handle('translations:get', (_e, texts: string[]): Record<string, string> => {
+  // 译文缓存按「目标语言 + 原文」作键：zh-CN 沿用旧的纯文本键以保留既有缓存
+  const tkey = (t: string, lang: string): string => (lang === 'zh-CN' ? t : `[${lang}]${t}`)
+
+  ipcMain.handle('translations:get', (_e, texts: string[], lang = 'zh-CN'): Record<string, string> => {
     const out: Record<string, string> = {}
     const stmt = getDb().prepare('SELECT trans FROM translations WHERE src_sha = ?')
     for (const t of texts) {
-      const row = stmt.get(shaOf(t)) as { trans: string } | undefined
+      const row = stmt.get(shaOf(tkey(t, lang))) as { trans: string } | undefined
       if (row) out[t] = row.trans
     }
     return out
@@ -255,14 +267,15 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     'translations:put',
-    (_e, items: Array<{ text: string; trans: string }>): boolean => {
+    (_e, items: Array<{ text: string; trans: string }>, lang = 'zh-CN'): boolean => {
       const db = getDb()
       const stmt = db.prepare(
         'INSERT OR REPLACE INTO translations (src_sha, trans, created_at) VALUES (?, ?, ?)'
       )
       db.transaction(() => {
         for (const it of items) {
-          if (it.text && it.trans) stmt.run(shaOf(it.text), it.trans, new Date().toISOString())
+          if (it.text && it.trans)
+            stmt.run(shaOf(tkey(it.text, lang)), it.trans, new Date().toISOString())
         }
       })()
       return true
@@ -286,7 +299,7 @@ export function registerIpc(): void {
         const sender = evt.sender
         void (async () => {
           try {
-            const results = await translateParagraphs(todo, (done, total) => {
+            const results = await translateParagraphs(todo, 'zh-CN', (done, total) => {
               try {
                 sender.send('translation:progress', { done, total, kind: 'prefetch' })
               } catch {

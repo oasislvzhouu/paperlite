@@ -1149,3 +1149,172 @@ body.reflow-mode .zoomer { display: none; }
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-weak);
 }
+
+/* ═══ 公式/插图悬浮工具条（Phase 4.1） ═══════════════════════════ */
+
+#reflow-article .formula.has-media-tools,
+#reflow-article figure.has-media-tools { position: relative; }
+.media-tools {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 5;
+}
+#reflow-article .formula.has-media-tools:hover .media-tools,
+#reflow-article figure.has-media-tools:hover .media-tools,
+.media-tools:hover,
+.media-tools:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.media-tools button {
+  width: 25px;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+}
+.media-tools button:hover { background: var(--accent-weak); color: var(--accent); }
+
+/* AI 解释弹卡 */
+#explain-pop {
+  position: fixed;
+  z-index: 110;
+  width: 360px;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+}
+.exp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.exp-head button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.exp-head button:hover { background: var(--panel-2); color: var(--text); }
+#explain-body {
+  padding: 12px 14px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.exp-loading { color: var(--muted); }
+.exp-loading::after {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 6px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  vertical-align: -1px;
+}
+.exp-error { color: var(--danger); }
+
+/* 论文信息弹窗（对标 ReaderPopupPaperInfo） */
+#info-pop {
+  position: absolute;
+  top: 52px;
+  right: 40px;
+  z-index: 40;
+  width: 320px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+}
+.info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+.info-head button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.info-head button:hover { background: var(--panel-2); color: var(--text); }
+#info-body { padding: 12px 14px; }
+.info-title {
+  font-weight: 600;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.info-grid {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 6px 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.info-grid b { color: var(--text); font-weight: 500; }
+.info-bar {
+  height: 5px;
+  margin: 12px 0 4px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.info-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+.info-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+.info-actions button {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12.5px;
+}
+.info-actions button:hover { border-color: var(--accent); color: var(--accent); }

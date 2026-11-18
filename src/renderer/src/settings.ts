@@ -16,6 +16,7 @@ export type FontKey =
   | 'sans'
   | 'song'
 export type TransStyle = 'underline' | 'block'
+export type TargetLang = 'zh-CN' | 'zh-TW' | 'en' | 'ja' | 'ko'
 
 export interface ReadSettings {
   theme: Theme
@@ -26,6 +27,8 @@ export interface ReadSettings {
   lh: number
   /** 译文呈现：下划线（Scholaread 风）/ 色块 */
   trans: TransStyle
+  /** 译文目标语言 */
+  lang: TargetLang
 }
 
 const KEY = 'pl.read.settings.v1'
@@ -35,7 +38,8 @@ const DEFAULTS: ReadSettings = {
   font: 'ebgaramond',
   size: 17,
   lh: 1.75,
-  trans: 'block'
+  trans: 'block',
+  lang: 'zh-CN'
 }
 
 /** 字体栈：前四项为随包开源字体（EB Garamond / Linux Libertine / Lato /
@@ -68,7 +72,11 @@ function read(): ReadSettings {
       font: p.font && p.font in FONTS ? p.font : DEFAULTS.font,
       size: typeof p.size === 'number' ? Math.min(28, Math.max(13, p.size)) : DEFAULTS.size,
       lh: typeof p.lh === 'number' ? Math.min(2.2, Math.max(1.3, p.lh)) : DEFAULTS.lh,
-      trans: p.trans === 'underline' ? 'underline' : 'block'
+      trans: p.trans === 'underline' ? 'underline' : 'block',
+      lang:
+        p.lang === 'zh-TW' || p.lang === 'en' || p.lang === 'ja' || p.lang === 'ko'
+          ? p.lang
+          : 'zh-CN'
     }
   } catch {
     return { ...DEFAULTS }
@@ -111,6 +119,8 @@ export function syncPanel(): void {
   seg('rs-trans', state.trans)
   const fontSel = document.querySelector<HTMLSelectElement>('#rs-font')
   if (fontSel) fontSel.value = state.font
+  const langSel = document.querySelector<HTMLSelectElement>('#rs-lang')
+  if (langSel) langSel.value = state.lang
   const size = document.querySelector<HTMLInputElement>('#rs-size')
   const sizeVal = document.querySelector<HTMLElement>('#rs-size-val')
   if (size) size.value = String(state.size)
@@ -148,6 +158,9 @@ export function initReadPrefs(): void {
   })
   document.querySelector('#rs-font')?.addEventListener('change', (e) => {
     updateSettings({ font: (e.target as HTMLSelectElement).value as FontKey })
+  })
+  document.querySelector('#rs-lang')?.addEventListener('change', (e) => {
+    updateSettings({ lang: (e.target as HTMLSelectElement).value as TargetLang })
   })
   document.querySelectorAll<HTMLButtonElement>('#rs-trans button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ trans: b.dataset.v as TransStyle }))

@@ -51,6 +51,7 @@
             <button id="font-dec" title="缩小字号">字−</button>
             <button id="font-inc" title="放大字号">字＋</button>
             <button id="notes-btn" title="笔记与高亮侧栏"><span>笔</span><i id="notes-count" class="badge">0</i></button>
+            <button id="info-btn" title="论文信息（进度 / 阅读时长 / 导出引用）">ⓘ</button>
             <button id="settings-btn" title="阅读设置（主题 / 字体 / 行高 / 译文样式）">Aa</button>
           </div>
           <div class="zoomer">
@@ -94,6 +95,16 @@
             <span class="rs-val" id="rs-lh-val">1.75</span>
           </div>
           <div class="rs-row">
+            <span class="rs-label">语言</span>
+            <select id="rs-lang" class="rs-select">
+              <option value="zh-CN">简体中文</option>
+              <option value="zh-TW">繁體中文</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+              <option value="ko">한국어</option>
+            </select>
+          </div>
+          <div class="rs-row">
             <span class="rs-label">译文</span>
             <div class="rs-seg" id="rs-trans">
               <button data-v="underline">下划线</button>
@@ -106,6 +117,23 @@
         <div id="lightbox" hidden title="点击空白或按 Esc 关闭">
           <img id="lightbox-img" alt="" />
           <button id="lightbox-close" title="关闭">✕</button>
+        </div>
+        <!-- 论文信息弹窗 -->
+        <div id="info-pop" hidden>
+          <div class="info-head"><span>论文信息</span><button id="info-close" title="关闭">✕</button></div>
+          <div id="info-body"></div>
+          <div class="info-actions">
+            <button id="copy-bibtex" title="复制 BibTeX 条目">复制 BibTeX</button>
+            <button id="copy-endnote" title="复制 EndNote 条目">复制 EndNote</button>
+          </div>
+        </div>
+        <!-- AI 解释弹卡 -->
+        <div id="explain-pop" hidden>
+          <div class="exp-head">
+            <span>AI 解释</span>
+            <button id="explain-close" title="关闭">✕</button>
+          </div>
+          <div id="explain-body"></div>
         </div>
         <!-- 笔记与高亮侧栏 -->
         <aside id="notes-panel" hidden>

@@ -19,12 +19,14 @@ const api = {
     ipcRenderer.invoke('library:saveThumb', id, dataUrl),
   llmStatus: (): Promise<{ baseUrl: string; model: string; hasKey: boolean }> =>
     ipcRenderer.invoke('llm:status'),
-  translateParagraphs: (texts: string[]): Promise<string[]> =>
-    ipcRenderer.invoke('translate:paragraphs', texts),
-  translationsGet: (texts: string[]): Promise<Record<string, string>> =>
-    ipcRenderer.invoke('translations:get', texts),
-  translationsPut: (items: Array<{ text: string; trans: string }>): Promise<boolean> =>
-    ipcRenderer.invoke('translations:put', items),
+  explainImage: (dataUrl: string, kind: 'formula' | 'figure'): Promise<string> =>
+    ipcRenderer.invoke('vision:explain', dataUrl, kind),
+  translateParagraphs: (texts: string[], lang?: string): Promise<string[]> =>
+    ipcRenderer.invoke('translate:paragraphs', texts, lang ?? 'zh-CN'),
+  translationsGet: (texts: string[], lang?: string): Promise<Record<string, string>> =>
+    ipcRenderer.invoke('translations:get', texts, lang ?? 'zh-CN'),
+  translationsPut: (items: Array<{ text: string; trans: string }>, lang?: string): Promise<boolean> =>
+    ipcRenderer.invoke('translations:put', items, lang ?? 'zh-CN'),
   translationsPrefetch: (texts: string[]): Promise<{ cached: number; queued: number }> =>
     ipcRenderer.invoke('translations:prefetch', texts),
   /** 主进程翻译器空闲信号（全局预翻译排队时用于让路） */

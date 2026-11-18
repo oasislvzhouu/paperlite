@@ -9,6 +9,7 @@ import { isPollutedLatex } from './llm-shared'
 import { applySettings, getSettings, updateSettings } from './settings'
 import { initCitationEvents, linkCitations } from './citations'
 import { initNotesPanel } from './notes-panel'
+import { initMediaTools } from './media-tools'
 
 type Mode = 'reflow' | 'original'
 
@@ -97,6 +98,33 @@ function renderToc(): void {
 let doc: PDFDocumentProxy | null = null
 let task: pdfjsLib.PDFDocumentLoadingTask | null = null
 let readingId = 0
+/** 当前文献的累计阅读时长（秒）与本次会话起点 */
+let readSecsBase = 0
+let sessionStart = 0
+/** PDF 元数据（标题/作者/年份），供引用导出使用 */
+let pdfMeta: { title?: string; author?: string; created?: string } = {}
+let currentInfo: { title: string; page_count: number | null; size_bytes: number } | null = null
+
+const readTimeKey = (id: number): string => `pl.readtime.${id}`
+function loadReadSecs(id: number): number {
+  const v = Number(localStorage.getItem(readTimeKey(id)) ?? '0')
+  return Number.isFinite(v) ? v : 0
+}
+/** 把本次会话时长结算进 localStorage */
+function flushReadTime(): void {
+  if (readingId > 0 && sessionStart > 0) {
+    const add = Math.max(0, Math.round((Date.now() - sessionStart) / 1000))
+    localStorage.setItem(readTimeKey(readingId), String(loadReadSecs(readingId) + add))
+  }
+  sessionStart = 0
+}
+function fmtDuration(sec: number): string {
+  if (sec < 60) return `${sec} 秒`
+  const m = Math.floor(sec / 60)
+  if (m < 60) return `${m} 分钟`
+  const h = Math.floor(m / 60)
+  return `${h} 小时 ${m % 60} 分`
+}
 let pageNum = 1
 let zoom = 1
 let fitWidth = true
@@ -141,6 +169,7 @@ function escapeHtml(s: string): string {
 export async function openReader(id: number): Promise<void> {
   const info = await window.paperlite.openReading(id)
   if (!info) return
+  flushReadTime() // 切换文献：先结算上一篇的阅读时长
   await task?.destroy()
   const load = (): void => {
     task = pdfjsLib.getDocument({
@@ -162,6 +191,21 @@ export async function openReader(id: number): Promise<void> {
     doc = await task!.promise
   }
   readingId = id
+  currentInfo = { title: info.title, page_count: doc.numPages, size_bytes: info.sizeBytes }
+  readSecsBase = loadReadSecs(id)
+  sessionStart = Date.now()
+  try {
+    const meta = await doc.getMetadata()
+    const mi = (meta?.info ?? {}) as Record<string, unknown>
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+    pdfMeta = {
+      title: str(mi['Title']),
+      author: str(mi['Author']),
+      created: str(mi['CreationDate'])
+    }
+  } catch {
+    pdfMeta = {}
+  }
   pageNum = clamp(info.lastPage || 1, 1, doc.numPages)
   zoom = 1
   pageCanvasCache.clear()
@@ -241,7 +285,112 @@ export async function openReader(id: number): Promise<void> {
   void window.paperlite.saveProgress(id, pageNum, doc.numPages)
 }
 
+/* ── 论文信息弹窗：进度 / 阅读时长 / 引用导出 ── */
+
+function fmtSize(bytes: number): string {
+  if (!bytes) return '—'
+  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+function yearOf(created?: string): string {
+  const m = created ? /(\d{4})/.exec(created) : null
+  return m ? m[1] : String(new Date().getFullYear())
+}
+
+/** 作者串 → "姓, 名 and 姓, 名"（BibTeX 惯例；解析失败则原样） */
+function bibAuthors(author?: string): string {
+  if (!author) return ''
+  return author
+    .split(/[,;]|\s+and\s+/i)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((name) => {
+      const parts = name.split(/\s+/)
+      if (parts.length === 1) return name
+      const last = parts[parts.length - 1]
+      return `${last}, ${parts.slice(0, -1).join(' ')}`
+    })
+    .join(' and ')
+}
+
+function bibKey(): string {
+  const a = bibAuthors(pdfMeta.author).split(' and ')[0] ?? ''
+  const surname = (a.split(',')[0] || 'paper').replace(/[^A-Za-z]/g, '').toLowerCase() || 'paper'
+  const t = (pdfMeta.title ?? currentInfo?.title ?? 'untitled')
+    .split(/\s+/)
+    .filter((w) => /[A-Za-z]{4,}/.test(w))[0]
+  return `${surname}${yearOf(pdfMeta.created)}${(t ?? '').replace(/[^A-Za-z]/g, '').toLowerCase()}`
+}
+
+function bibtex(): string {
+  const title = pdfMeta.title ?? currentInfo?.title ?? ''
+  const authors = bibAuthors(pdfMeta.author)
+  const year = yearOf(pdfMeta.created)
+  const lines = [
+    `@article{${bibKey()},`,
+    title ? `  title   = {${title}},` : '',
+    authors ? `  author  = {${authors}},` : '',
+    `  year    = {${year}},`,
+    `  note    = {PaperLite}`,
+    '}'
+  ]
+  return lines.filter(Boolean).join(String.fromCharCode(10))
+}
+
+function endnote(): string {
+  const title = pdfMeta.title ?? currentInfo?.title ?? ''
+  const year = yearOf(pdfMeta.created)
+  const rows = ['%0 Journal Article']
+  if (pdfMeta.author) rows.push(`%A ${pdfMeta.author}`)
+  if (title) rows.push(`%T ${title}`)
+  rows.push(`%D ${year}`)
+  rows.push('%Z PaperLite')
+  return rows.join(String.fromCharCode(10))
+}
+
+async function copyText(text: string, okMsg: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+    showChip(okMsg)
+  } catch {
+    showChip('复制失败（剪贴板不可用）')
+  }
+}
+
+function showChip(msg: string): void {
+  const chip = document.querySelector<HTMLElement>('#trans-status')
+  const text = document.querySelector<HTMLElement>('#trans-status-text')
+  if (!chip || !text) return
+  text.textContent = msg
+  chip.classList.remove('done')
+  chip.hidden = false
+  window.setTimeout(() => {
+    chip.classList.add('done')
+    window.setTimeout(() => (chip.hidden = true), 450)
+  }, 1600)
+}
+
+function renderInfoPop(): void {
+  const body = document.querySelector<HTMLElement>('#info-body')
+  if (!body || !currentInfo) return
+  const pages = currentInfo.page_count ?? 0
+  const progress = pages > 0 ? Math.round((pageNum / pages) * 100) : 0
+  const secs = loadReadSecs(readingId) + (sessionStart ? Math.round((Date.now() - sessionStart) / 1000) : 0)
+  body.innerHTML = `
+    <div class="info-title">${(pdfMeta.title ?? currentInfo.title).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c] as string)}</div>
+    <div class="info-grid">
+      <span>作者</span><b>${pdfMeta.author ? pdfMeta.author.replace(/[<>&]/g, '') : '—'}</b>
+      <span>年份</span><b>${yearOf(pdfMeta.created)}</b>
+      <span>页数</span><b>${pages || '—'}</b>
+      <span>文件</span><b>${fmtSize(currentInfo.size_bytes)}</b>
+      <span>阅读进度</span><b>${progress}%（第 ${pageNum} 页）</b>
+      <span>累计阅读</span><b>${fmtDuration(secs)}</b>
+    </div>
+    <div class="info-bar"><i style="width:${Math.min(100, progress)}%"></i></div>`
+}
+
 export function closeReader(): void {
+  flushReadTime()
   $('#reader').hidden = true
   $('#shelf').hidden = false
   $('#shelf-header').hidden = false
@@ -951,7 +1100,8 @@ async function translateFlow(): Promise<void> {
   const paras = paragraphIndexes()
   const texts = paras.map((p) => p.text)
 
-  const cached = await window.paperlite.translationsGet(texts)
+  const lang = getSettings().lang
+  const cached = await window.paperlite.translationsGet(texts, lang)
   for (const p of paras) {
     if (cached[p.text]) insertTrans(p.bi, cached[p.text])
   }
@@ -974,11 +1124,11 @@ async function translateFlow(): Promise<void> {
     if (kind === 'interactive') btn.textContent = `翻译中 ${done}/${total}`
   })
   try {
-    const result = await window.paperlite.translateParagraphs(missing)
+    const result = await window.paperlite.translateParagraphs(missing, lang)
     const items = missing
       .map((text, i) => ({ text, trans: result[i] ?? '' }))
       .filter((x) => x.trans)
-    void window.paperlite.translationsPut(items)
+    void window.paperlite.translationsPut(items, lang)
     for (const p of paras) {
       const t = cached[p.text] ?? result[missing.indexOf(p.text)] ?? ''
       if (t) insertTrans(p.bi, t)
@@ -1199,6 +1349,7 @@ export function initReaderEvents(refreshShelf: () => void): void {
   initHighlightEvents(() => readingId)
   initCitationEvents()
   initNotesPanel()
+  initMediaTools()
   $('#back-btn').addEventListener('click', () => {
     closeReader()
     refreshShelf()
@@ -1235,6 +1386,21 @@ export function initReaderEvents(refreshShelf: () => void): void {
     widthIdx = (widthIdx + 1) % WIDTHS.length
     applyWidth()
   })
+  $('#info-btn').addEventListener('click', () => {
+    const pop = $('#info-pop')
+    pop.hidden = !pop.hidden
+    if (!pop.hidden) {
+      renderInfoPop()
+      const btn = $('#info-btn')
+      btn.classList.add('toggle-on')
+      window.setTimeout(() => btn.classList.remove('toggle-on'), 400)
+    }
+  })
+  $('#info-close').addEventListener('click', () => {
+    $('#info-pop').hidden = true
+  })
+  $('#copy-bibtex').addEventListener('click', () => void copyText(bibtex(), 'BibTeX 已复制'))
+  $('#copy-endnote').addEventListener('click', () => void copyText(endnote(), 'EndNote 条目已复制'))
   $('#toc-btn').addEventListener('click', () => {
     const p = $('#toc-panel')
     p.hidden = !p.hidden
