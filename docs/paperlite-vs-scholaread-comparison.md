@@ -69,3 +69,29 @@ and System Safety 253 (2025) 110556，24 页）。Scholaread 产物
 复测结果：第 1 页与 Scholaread 的结构、段落边界一致；摘要完整、关键词独立、
 Introduction 起双栏顺序正确，作者上标可见。第 2 页正文顺序、段落切分一致
 （PDF 自身有一处重复句，双方都保留）。
+
+---
+
+## 第三篇：MDPI 单栏（Sensors 2017, 17, 425）
+
+样本：**A New Deep Learning Model for Fault Diagnosis with Good Anti-Noise
+and Domain Adaptation Ability on Raw Vibration Signals**（21 页，单栏，
+逐段首行缩进 21pt、列表悬挂缩进、公式为矢量图）。Scholaread 产物
+`cmp/sc3-p1..p6.png`，PaperLite 截图 `cmp/ours3-p1..p6.png`。
+
+单栏页暴露出与双栏不同的 6 类问题：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 标题被拆成 h1 / 正文 / h1 三段，中间行变小且带分隔线 | 标题续行以 "with" 小写开头被排除出标题；`mergeHeadingContinuation` 又跳过 level 1，且只吸收一行 | 一级标题允许同字号续行（大写/小写均可，挡编号/句末/长正文）；合并后用 `lastTop` 继续吸收第 3、4 行 |
+| 2 | 作者行、`Abstract:`、`Keywords:` 全被渲染成 h3 | 粗体即标题的规则没有长度上限（MDPI 这些行都是粗体） | 粗体标题要求 ≤60 字符 |
+| 3 | 每段第二行都被拆成新段（第 3 页 "named Deep / Convolution…"） | flush-left 基线把 21pt 段落缩进当成第二栏基线 | 基线间距阈值从 20pt 提到 `max(20, 5×bodySize)` |
+| 4 | 列表项 `(1) …` 的续行独立成段 | 悬挂缩进被当成段首缩进 | `bufIsList` 期间不触发缩进断段 |
+| 5 | `…Section 2.` 与 `The intelligent…` 被拆段 | 同一视觉行被字体切换拆成两条同 y 行，未合并 | 同 y、同栏基线、横向紧邻的正文片段直接拼回（不参与分段） |
+| 6 | 页眉 `2 of 21` 并入正文；公式 (5)(6)(7) 全掉到页尾 | 页码正则不认 "N of M"；公式碎片簇被当成边栏（avgW<15% 且 ≥3 行）整组移到页尾 | 页码加 `\d+ of \d+`；数学行不参与边栏判定 |
+| 7 | 公式 (5) 分子 `ezj` 单独成段、裁图被切掉分子 | 分子行在公式簇 bbox 之上，未进簇 | 新增 `absorbFormulaFragments`：紧贴裁图、x 重叠的 ≤10 字符无空格段落并入 rect 并删除 |
+| 8 | 标题对齐（左/居中）判断错 | 只有 `left≤60` 的兜底 | 块级 `align`：多行标题按各行 x0 是否一致判定；合并标题时按两段 left 是否相同更新 |
+
+复测：第 1/3/6 页结构与 Scholaread 一致；公式 (1)(5)(6)(7) 完整（含分子），
+列表项、二级标题 `2.1.` 独立。两边都缺 MDPI 的矢量插图（Fig.1-3 在其转换
+产物里也是破图），属共同限制。

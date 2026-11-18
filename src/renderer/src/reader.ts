@@ -452,7 +452,12 @@ function renderReflow(): void {
       const roleCls = `${b.role ? ` ${b.role}` : ''}${b.fontKind ? ` ff-${b.fontKind}` : ''}${b.cross ? ` cross-${b.cross}` : ''}`
       // 标题字号用 PDF 原始比例（em），保留原文的层级视觉差；
       // 首页标题/作者按原文对齐：靠栏左缘的（Elsevier 左对齐版式）不再居中
-      const flushLeft = (b.role === 'title' || b.role === 'authors') && (b.left ?? 999) <= 60
+      // 多行标题按各行 x0 是否一致判定对齐（MDPI 左对齐 vs IEEE 居中）；
+      // 单行标题/作者沿用「靠左缘 ⇒ 左对齐」的兜底
+      const wantLeft =
+        b.align === 'left' ||
+        (!b.align && (b.role === 'title' || b.role === 'authors') && (b.left ?? 999) <= 60)
+      const flushLeft = (b.role === 'title' || b.role === 'authors' || lvl === 1) && wantLeft
       const fs = [
         b.fontScale ? `font-size:${(b.fontScale * (lvl === 1 ? 1.35 : 1)).toFixed(2)}em` : '',
         flushLeft ? 'text-align:left' : ''

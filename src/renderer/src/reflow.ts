@@ -45,6 +45,10 @@ export interface ReflowBlock {
   firstFontSize?: number
   /** 标题相对正文字号的比例（来自 PDF 原始字号，渲染时用作 em 尺寸） */
   fontScale?: number
+  /** 版面对齐（多行标题按各行 x0 是否一致判定） */
+  align?: 'left' | 'center'
+  /** 标题续行合并后的最后一行 top（内部使用） */
+  lastTop?: number
   /** 元数据角色：首页结构化 + 全文图注 + 算法框原子块 + 参考文献条目 */
   role?:
     | 'title'
@@ -154,7 +158,8 @@ export interface Line {
   formulaCluster?: { x0: number; x1: number; y0: number; y1: number; text: string }
 }
 
-const PAGE_NUMBER_RE = /^\s*(page\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
+const PAGE_NUMBER_RE =
+  /^\s*(page\s*\d+|\d+\s*(?:of|\/)\s*\d+|–?\s*\d+\s*–?|-\s*\d+\s*-)\s*$/i
 
 /** 版权/授权样板文字（出版社首页边栏/页脚，不属于正文内容） */
 const COPYRIGHT_LINE_RE =
@@ -394,7 +399,10 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
 
   // 边栏簇：平均行宽 < 15% 页宽（正文行通常 > 20%）；图片行不参与边栏判定
   const avgW = (ls: Line[]) => ls.reduce((n, l) => n + (l.x1 - l.x0), 0) / ls.length
-  const isSidebar = (ls: Line[]) => avgW(ls) < pageWidth * 0.15 && ls.length >= 3
+  // 公式碎片（分式/上下标）也是窄行，曾被当成边栏整组排到页尾
+  // （MDPI 第 6 页三条公式全部掉到正文之后）——数学行不参与边栏判定
+  const isSidebar = (ls: Line[]) =>
+    avgW(ls) < pageWidth * 0.15 && ls.length >= 3 && ls.every((l) => !isMathishLine(l))
 
   const main: Line[] = []
   const sidebar: Line[] = []
@@ -457,7 +465,7 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
           ...headWide.sort(topDown),
           ...headMain.filter((l) => l.x1 <= mid + gutter).sort(topDown)
         ]
-      : realSpanning.sort(topDown)
+      : [...headMain.sort(topDown), ...realSpanning.sort(topDown)]
     // 首页页脚（通讯邮箱/doi/版权/收稿日期）在左栏 x 位置、但位于两栏正文
     // 之下：按 y 单独摘出放到双栏之后，否则会被读成左栏正文末尾
     const footCut = useMix && pageHeight ? pageHeight * 0.82 : Number.POSITIVE_INFINITY
@@ -540,14 +548,16 @@ function isFormulaLine(l: Line): boolean {
 
 /** 文本模式章节标题：罗马数字/字母编号（"I. INTRODUCTION"、"A. Pseudo-Label"），
  *  IEEE/Elsevier 小写大写章节标题字号与正文相同，字号启发式抓不到 */
-const SECTION_HEADING_RE = /^(?:[IVXLC]{1,5}|[A-Z]|\d{1,2})\.\s+\S+/
+const SECTION_HEADING_RE = /^(?:[IVXLC]{1,5}|[A-Z]|\d{1,2}(?:\.\d{1,2})*)\.\s+\S+/
 function isSectionHeadingText(t: string): boolean {
   const s = t.trim()
   if (s.length > 80) return false
   if (!SECTION_HEADING_RE.test(s)) return false
   const words = s.split(/\s+/)
   if (words.length > 12) return false
-  return /^[A-Z]/.test(s)
+  // 数字编号（"2.1."）也必须放行；旧正则只匹配字母开头，数字章节标题
+  // 会被并进上一段（MDPI "2.1. Convolutional Layer"）
+  return /^(?:[A-Z]|\d)/.test(s)
 }
 
 function isSectionHeadingLine(l: Line): boolean {
@@ -748,8 +758,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         .slice(0, 3)
         .map(([x]) => x)
         .sort((a, b) => a - b)
-      // 相邻基线（<20pt）合并为同一栏
-      bases = bases.filter((b, i) => i === 0 || b - bases[i - 1] >= 20)
+      // 相邻基线合并为同一栏：段落首行缩进常是 10-20pt，若当成第二栏基线，
+      // 每段第二行都会被判成"换栏"而断开（MDPI 每段都缩进 21pt）
+      bases = bases.filter((b, i) => i === 0 || b - bases[i - 1] >= Math.max(20, bodySize * 5))
       if (bases.length === 0) bases = [Math.min(...arr.map((l) => l.x0))]
       flushBases.set(pg, bases)
     }
@@ -822,6 +833,10 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         block.top = bufLines[0].yTop
         block.firstFontSize = bufLines[0].fontSize
         block.left = bufLines[0].x0
+        if (block.kind === 'heading' && bufLines.length >= 2) {
+          const xs = bufLines.map((l) => l.x0)
+          block.align = Math.max(...xs) - Math.min(...xs) <= 3 ? 'left' : 'center'
+        }
         if (bufLines.filter((l) => l.bold).length * 2 > bufLines.length) block.bold = true
       }
       // 块级字体类别：多数行的字体族（用于按原文类型匹配随包字体）
@@ -1048,7 +1063,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       headingEligible &&
       headingShapeOk &&
       !forceParaByBand &&
-      (isHeadingSize(l.fontSize) || isSectionHeadingLine(l) || !!l.bold)
+      (isHeadingSize(l.fontSize) ||
+        isSectionHeadingLine(l) ||
+        // 粗体只对短行生效：作者行/摘要首行/关键词行也是粗体，
+        // 旧规则把 MDPI 首页切成多个 h3
+        (!!l.bold && headingText.length <= 60))
     // 文献区内不判公式：doi/卷期行被当公式裁图只产出垃圾。
     // 句子片段（"t −1."）同理：含 − 号会让数学占比爆掉
     const kindText = l.text.trim()
@@ -1064,6 +1083,23 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
           : heading
             ? 'heading'
             : 'paragraph'
+
+    // 同一视觉行被字体切换拆成多段（MDPI "…in Section 2." + "The intelligent…"）：
+    // 同 y、同栏基线、横向紧邻的正文片段直接拼回缓冲区，不参与分段判定
+    if (
+      bufT.length > 0 &&
+      bufKind === 'paragraph' &&
+      kind === 'paragraph' &&
+      lines[i - 1] &&
+      Math.abs(l.yTop - lines[i - 1].yTop) <= 2.5 &&
+      baseOf(l) === baseOf(lines[i - 1]) &&
+      l.x0 >= lines[i - 1].x1 - 2 &&
+      l.x0 - lines[i - 1].x1 <= bodySize * 2
+    ) {
+      bufT[bufT.length - 1] = `${bufT[bufT.length - 1]} ${l.text.trim()}`.replace(/\s+/g, ' ')
+      bufH[bufH.length - 1] = `${bufH[bufH.length - 1] ?? ''} ${l.html}`.trim()
+      continue
+    }
 
     // 孤立公式编号行（"(1)"）：紧跟公式块或编号行的并入前块
 
@@ -1095,7 +1131,10 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       // "represen-"+"tation" → "representation" 出现过 ⇒ 断词，去连字符；
       // "frequency-"+"domain" → "frequencydomain" 从未出现 ⇒ 复合词，保留连字符
       const joined = prevWord && nextWord ? prevWord + nextWord : ''
-      const keepHyphen = !!acronym || (lower && !(joined && (wordCounts.get(joined) ?? 0) > 0))
+      // 左片段 ≤3 字母几乎都是断词（hy-phenation），不可能是复合词左半
+      const keepHyphen =
+        !!acronym ||
+        (lower && !!prevWord && prevWord.length >= 4 && !(joined && (wordCounts.get(joined) ?? 0) > 0))
       if (lower || acronym) {
         const base = lastT.replace(/\s+$/, '')
         bufT[bufT.length - 1] =
@@ -1181,7 +1220,8 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         const b = baseOf(l)
         const bp = baseOf(prev)
         const sameBase = b !== undefined && bp === b
-        if (b !== undefined && sameBase && l.x0 - b >= 2.5) brk = true
+        // 列表项用悬挂缩进：续行与首行都右移 marker 宽度，不能当段首缩进
+        if (b !== undefined && sameBase && l.x0 - b >= 2.5 && !bufIsList) brk = true
         else {
           // ② 旧启发式兜底（无基线数据时）
           const dx = l.x0 - prev.x0
@@ -1731,6 +1771,42 @@ function fixElsevierFirstPage(blocks: ReflowBlock[]): void {
     .sort((x, y) => rank(x.b) - rank(y.b) || (x.b.top ?? 0) - (y.b.top ?? 0) || x.i - y.i)
     .map((x) => x.b)
   blocks.splice(firstIdx, page1.length, ...ordered)
+}
+
+/** 吸收紧贴公式裁图的小碎片（分子/分母/上标被拆成独立段）：
+ *  例如 MDPI 的 softmax 公式分子 "ezj" 落在裁图 y0 之上，文字单独成段、
+ *  裁图又被切掉分子。把矩形扩到碎片并删除该段。 */
+function absorbFormulaFragments(blocks: ReflowBlock[], bodySize: number): void {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const f = blocks[i]
+    if (f.kind !== 'formula' || !f.rect) continue
+    for (const dir of [-1, 1]) {
+      const j = i + dir
+      const n = blocks[j]
+      if (!n || n.page !== f.page || n.kind !== 'paragraph' || n.role) continue
+      const t = n.text.trim()
+      if (t.length === 0 || t.length > 10 || /\s/.test(t)) continue
+      if ((n.firstFontSize ?? bodySize) > bodySize * 1.6) continue
+      const overlap =
+        Math.min(f.rect.x1, (n.left ?? f.rect.x0) + 12) - Math.max(f.rect.x0, n.left ?? f.rect.x0)
+      if (overlap <= 0) continue
+      const top = n.top ?? f.top ?? 0
+      const bottom = top + (n.firstFontSize ?? bodySize)
+      const nearY =
+        (top >= f.rect.y0 - bodySize * 2 && top <= f.rect.y1 + bodySize * 0.5) ||
+        (bottom >= f.rect.y0 - bodySize * 0.5 && bottom <= f.rect.y1 + bodySize * 2)
+      if (!nearY) continue
+      f.rect = {
+        x0: Math.min(f.rect.x0, n.left ?? f.rect.x0),
+        x1: Math.max(f.rect.x1, (n.left ?? f.rect.x0) + 12),
+        y0: Math.min(f.rect.y0, top - 2),
+        y1: Math.max(f.rect.y1, bottom + 2)
+      }
+      blocks.splice(j, 1)
+      if (dir === -1) i--
+      break
+    }
+  }
 }
 
 /** 首页版式修复：作者行碎片合并、无数学内容的 formula 降级、
@@ -2338,6 +2414,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   fixFirstPageLayout(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
+  absorbFormulaFragments(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   mergeHeadingContinuation(blocks)
@@ -2391,20 +2468,38 @@ function mergeHeadingContinuation(blocks: ReflowBlock[]): void {
   for (let i = blocks.length - 2; i >= 0; i--) {
     const a = blocks[i]
     const b = blocks[i + 1]
-    if (a.kind !== 'heading' || a.level === 1) continue
+    if (a.kind !== 'heading') continue
     if (b.kind !== 'heading' && b.kind !== 'paragraph') continue
     if (a.page !== b.page || a.top === undefined || b.top === undefined) continue
-    if (b.top < a.top || b.top - a.top > (a.firstFontSize ?? 12) * 2.2) continue
+    const aLast = a.lastTop ?? a.top
+    if (b.top < a.top || b.top - aLast > (a.firstFontSize ?? 12) * 1.6) continue
     // 同一基线的右栏行会被阅读序排到左栏标题之后；跨栏不能算标题续行
     if (a.left !== undefined && b.left !== undefined &&
         Math.abs(b.left - a.left) > (a.firstFontSize ?? 12) * 4) continue
-    if (!/^[a-z]/.test(b.text.trim())) continue
     const fsA = a.firstFontSize ?? 0
     const fsB = b.firstFontSize ?? 0
-    if (Math.abs(fsA - fsB) > Math.max(2, fsA * 0.25)) continue
-    a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
-    a.html = `${a.html ?? a.text} ${b.html ?? b.text}`
+    // 一级标题的续行必须几乎同字号（Elsevier 标题 21pt 与作者 17pt 差 19%，
+    // 旧 25% 容差会把作者行并进标题）
+    const sizeOk =
+      a.level === 1
+        ? Math.abs(fsA - fsB) <= Math.max(1.5, fsA * 0.08)
+        : Math.abs(fsA - fsB) <= Math.max(2, fsA * 0.25)
+    if (!sizeOk) continue
+    const bt = b.text.trim()
+    if (a.level === 1) {
+      // 论文题常折成 3-4 行，续行可能以大写或小写开头：
+      // 只挡编号章节、句末标点、过长正文（正文首行通常 >160 字）
+      if (/^(?:\d{1,2}|[IVXLC]{1,5})\.\s/.test(a.text.trim())) continue
+      if (/[.!?;:]$/.test(bt)) continue
+      if (bt.length > 160 || a.text.length + bt.length > 260) continue
+    } else if (!/^[a-z]/.test(bt)) continue
+    const sameLeft = a.left !== undefined && b.left !== undefined && Math.abs(a.left - b.left) <= 3
+    a.align = sameLeft ? 'left' : 'center'
+    a.lastTop = b.top
+    a.text = `${a.text} ${bt}`.replace(/\s+/g, ' ').trim()
+    a.html = `${a.html ?? a.text} ${b.html ?? bt}`
     blocks.splice(i + 1, 1)
+    i++ // 同一标题块继续吸收下一行（3-4 行标题）
   }
 }
 
