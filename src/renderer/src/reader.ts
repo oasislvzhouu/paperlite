@@ -6,6 +6,7 @@ import { extractReflowBlocks, extractReflowBlocksMupdf, cropPageImages, type Mup
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
 import { recreatePdfWorker } from './worker-mgr'
 import { isPollutedLatex } from './llm-shared'
+import { applySettings, getSettings, updateSettings } from './settings'
 
 type Mode = 'reflow' | 'original'
 
@@ -122,7 +123,8 @@ async function loadMupdf(): Promise<any> {
 let llmParsing = new Set<number>()
 
 
-let reflowFont = 17
+/** 正文字号（与阅读设置共享、持久化） */
+let reflowFont = getSettings().size
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
 
@@ -289,7 +291,8 @@ function renderReflow(): void {
     }
   })
   article.innerHTML = parts.join('\n')
-  article.style.setProperty('--reflow-font', `${reflowFont}px`)
+  reflowFont = getSettings().size
+  applySettings()
   article.classList.remove('show-trans', 'has-trans')
 }
 
@@ -1212,12 +1215,14 @@ export function initReaderEvents(refreshShelf: () => void): void {
     if (!pdfScrollBuilt) void buildPdfScroll().then(() => goTo(pageNum))
   })
   $('#font-dec').addEventListener('click', () => {
-    reflowFont = clamp(reflowFont - 1, 13, 30)
-    $('#reflow-article').style.setProperty('--reflow-font', `${reflowFont}px`)
+    const size = clamp(getSettings().size - 1, 13, 28)
+    updateSettings({ size })
+    reflowFont = size
   })
   $('#font-inc').addEventListener('click', () => {
-    reflowFont = clamp(reflowFont + 1, 13, 30)
-    $('#reflow-article').style.setProperty('--reflow-font', `${reflowFont}px`)
+    const size = clamp(getSettings().size + 1, 13, 28)
+    updateSettings({ size })
+    reflowFont = size
   })
   $('#translate-btn').addEventListener('click', () => void translateFlow())
   $('#width-btn').addEventListener('click', () => {

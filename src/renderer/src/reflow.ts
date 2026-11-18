@@ -1592,6 +1592,9 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   markFormulaContinuation(blocks)
   markCaptions(blocks)
   markReferences(blocks)
+  // 丢弃落在表格/算法裁图矩形内的短段落：表注的多行标题（"EMUs."）会被
+  // 单独留成段落，而裁图已把它包含进像素 → 页面出现重复文字
+  dropTextInsideAtomicCrops(blocks)
   // 丢弃落在插图内的公式块（图内标签，不是正文公式）
   const keptBlocks = blocks.filter((b) => {
     if (b.kind !== 'formula' || !b.rect) return true
@@ -1602,6 +1605,27 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
     )
   })
   return keptBlocks
+}
+
+/** 删除与表格/算法裁图矩形重叠的短段落（裁图已含其像素，避免重复） */
+function dropTextInsideAtomicCrops(blocks: ReflowBlock[]): void {
+  const crops = blocks.filter(
+    (b) => b.kind === 'table' && b.rect && b.top !== undefined
+  )
+  if (crops.length === 0) return
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (b.kind !== 'paragraph' || b.role || b.top === undefined) continue
+    if (b.text.trim().length > 40) continue
+    const inside = crops.some(
+      (t) =>
+        t !== b &&
+        t.page === b.page &&
+        b.top! >= t.rect!.y0 - 1 &&
+        b.top! <= t.rect!.y1 + 1
+    )
+    if (inside) blocks.splice(i, 1)
+  }
 }
 
 /** 孤立碎片块归并（块级后处理）：极短无标点行 / 含希腊符号且散文词≤3 的

@@ -1,17 +1,55 @@
 :root {
-  --bg: #14161a;
-  --panel: #1d2026;
-  --panel-2: #24282f;
-  --line: #2e333c;
-  --text: #e8eaed;
-  --muted: #b3bbc7;
-  --accent: #409eff;
-  --accent-weak: rgba(64, 158, 255, 0.16);
+  /* 主题令牌：默认深色。配色参照 Scholaread 阅读层（--srd-*）：
+     文字层次 #dcdcdc/#b2b2b2/#666，主色紫罗兰，护眼为暖纸色 */
+  --bg: #121214;
+  --panel: #1a1a1e;
+  --panel-2: #24242a;
+  --line: #32323a;
+  --text: #dcdcdc;
+  --muted: #9a9aa4;
+  --accent: #8b84ff;
+  --accent-weak: rgba(139, 132, 255, 0.16);
+  --link: #b9b0ff;
   --danger: #e5484d;
   --radius: 10px;
   --font-article: Georgia, 'Times New Roman', 'Songti SC', SimSun, serif;
   --font-math: 'Cambria Math', 'STIX Two Math', 'Latin Modern Math', 'Times New Roman', serif;
+  --read-lh: 1.75;
+  /* 公式/表格裁图面板（深色下反色为黑底白线） */
+  --img-panel: #ffffff;
+  --img-ink: #111;
 }
+
+/* ── 浅色主题 ── */
+:root[data-theme='light'] {
+  --bg: #fff;
+  --panel: #f7f7f8;
+  --panel-2: #eee;
+  --line: #e3e3e6;
+  --text: #121212;
+  --muted: #666;
+  --accent: #4f46e5;
+  --accent-weak: rgba(79, 70, 229, 0.1);
+  --link: #6059f0;
+  --danger: #e5484d;
+  --img-panel: #ffffff;
+}
+
+/* ── 护眼主题（暖纸，Scholaread 的 --srd-primary-color #ad8e70 系） ── */
+:root[data-theme='sepia'] {
+  --bg: #f4efe6;
+  --panel: #fbf7ef;
+  --panel-2: #efe7d9;
+  --line: #e0d5c3;
+  --text: #2b2622;
+  --muted: #7a6f63;
+  --accent: #ad8e70;
+  --accent-weak: rgba(173, 142, 112, 0.16);
+  --link: #8a6a48;
+  --danger: #b4463f;
+  --img-panel: #fffdf8;
+}
+
 
 * { box-sizing: border-box; }
 
@@ -420,13 +458,13 @@ body.reflow-mode .zoomer { display: none; }
   margin: 28px auto 0;
   font-family: var(--font-article);
   font-size: var(--reflow-font);
-  line-height: 1.8;
+  line-height: var(--read-lh);
   color: var(--text);
   letter-spacing: 0.2px;
   padding-bottom: 60px;
   transition: max-width 0.2s ease;
 }
-/* 对齐 Scholaread SR-Article 实测参数：首行缩进 2em、段落边距、标题层次 */
+/* 对齐 Scholaread SR-Article 实测参数：段距 1.5em、行高可调（1.4 / 1.75 / 1.8） */
 #reflow-article p {
   margin: 1em 0;
   text-align: justify;
@@ -441,7 +479,7 @@ body.reflow-mode .zoomer { display: none; }
   margin: 1.6em 0 0.7em;
   line-height: 1.35;
   font-family: inherit;
-  color: #fff;
+  color: var(--text);
   text-indent: 0;
 }
 #reflow-article h1 {
@@ -692,3 +730,161 @@ body.reflow-mode .zoomer { display: none; }
   background: #fff;
   border-radius: 4px;
 }
+
+/* ═══ 对标 Scholaread 阅读层（Phase 3.8） ═══════════════════════════════ */
+
+/* 公式/表格裁图为白底线图：深色主题下反色融合（对标 html.srd-dark 的
+ * formula-container invert+hue-rotate），避免深色页面上刺眼的白块。
+ * 照片类插图（figure.figure）不反色。 */
+:root[data-theme='dark'] #reflow-article .formula img.formula-img,
+:root[data-theme='dark'] #reflow-article figure.table img {
+  /* contrast 把 JPEG 偏灰的白底（反色后 ~5-10）压到纯黑，经 screen 混合
+     才真正透明；否则整块裁图会显示为一个比页面略亮的方形 */
+  filter: invert(1) hue-rotate(180deg) contrast(1.35);
+  background: transparent;
+  /* screen 混合：反色后的黑底在深色页面上变透明，只剩白线，避免出现
+     比页面更黑的方块（Scholaread 用面板底色 #2c2c2c 掩盖，这里更彻底） */
+  mix-blend-mode: screen;
+  /* 反色后边框/圆角会形成"卡片框"，与透明混合效果冲突，去掉 */
+  border: 0 !important;
+  border-radius: 0;
+}
+/* 裁图圆角 + 面板（Scholaread: border-radius 4px / 16px 上边距 / zoom-in） */
+#reflow-article .formula,
+#reflow-article figure.table,
+#reflow-article figure.figure {
+  cursor: zoom-in;
+}
+#reflow-article figure.table img,
+#reflow-article figure.figure img {
+  border-radius: 6px;
+  background: var(--img-panel);
+}
+#reflow-article figure.figure img { box-shadow: 0 1px 6px rgba(0, 0, 0, 0.12); }
+
+/* 译文：下划线模式（Scholaread 的 signature 样式）
+ * text-decoration: underline dotted #aaa; offset 4px; skip-ink none */
+#reflow-article[data-trans-style='underline'] p.trans {
+  display: none;
+  margin: 0.15em 0 1.15em;
+  padding: 0;
+  border-left: 0;
+  background: transparent;
+  border-radius: 0;
+  color: var(--muted);
+  line-height: 1.8;
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 4px;
+  text-decoration-skip-ink: none;
+}
+#reflow-article[data-trans-style='underline'].show-trans p.trans { display: block; }
+
+/* ── 阅读设置面板 ── */
+#read-settings {
+  position: absolute;
+  top: 52px;
+  right: 92px;
+  z-index: 40;
+  width: 300px;
+  padding: 14px 16px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+}
+.rs-head {
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+.rs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 9px 0;
+}
+.rs-label {
+  width: 34px;
+  flex: none;
+  color: var(--muted);
+}
+.rs-seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  flex-wrap: wrap;
+}
+.rs-seg button {
+  border: 0;
+  border-radius: 0;
+  padding: 4px 9px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--muted);
+}
+.rs-seg button + button { border-left: 1px solid var(--line); }
+.rs-seg button.on {
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-weight: 600;
+}
+.rs-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+  min-width: 0;
+}
+.rs-val {
+  width: 34px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.rs-tip {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* ── 灯箱（图表/公式/表格点击放大） ── */
+#lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 10, 0.86);
+  backdrop-filter: blur(2px);
+  cursor: zoom-out;
+}
+#lightbox img {
+  max-width: 94vw;
+  max-height: 90vh;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  cursor: zoom-in;
+}
+#lightbox img.actual {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+#lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  border: 0;
+  color: #fff;
+  font-size: 16px;
+}
+/* 深色主题下灯箱里的线图同样反色（灯箱背景本身是深色，不用 screen） */
+:root[data-theme='dark'] #lightbox img { filter: invert(1) hue-rotate(180deg); }

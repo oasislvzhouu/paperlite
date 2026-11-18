@@ -50,12 +50,57 @@
             <button id="width-btn" title="切换版面宽度">宽</button>
             <button id="font-dec" title="缩小字号">字−</button>
             <button id="font-inc" title="放大字号">字＋</button>
+            <button id="settings-btn" title="阅读设置（主题 / 字体 / 行高 / 译文样式）">Aa</button>
           </div>
           <div class="zoomer">
             <button id="zoom-out-btn" title="缩小">缩−</button>
             <button id="fit-btn" class="toggle-on" title="适应宽度">适宽</button>
             <button id="zoom-in-btn" title="放大">缩＋</button>
           </div>
+        </div>
+        <!-- 阅读设置面板 -->
+        <div id="read-settings" hidden>
+          <div class="rs-head">阅读设置</div>
+          <div class="rs-row">
+            <span class="rs-label">主题</span>
+            <div class="rs-seg" id="rs-theme">
+              <button data-v="dark">深色</button>
+              <button data-v="light">浅色</button>
+              <button data-v="sepia">护眼</button>
+            </div>
+          </div>
+          <div class="rs-row">
+            <span class="rs-label">字体</span>
+            <div class="rs-seg" id="rs-font">
+              <button data-v="serif">衬线</button>
+              <button data-v="cambria">Cambria</button>
+              <button data-v="sans">无衬线</button>
+              <button data-v="song">宋体</button>
+            </div>
+          </div>
+          <div class="rs-row">
+            <span class="rs-label">字号</span>
+            <input id="rs-size" type="range" min="13" max="28" step="1" />
+            <span class="rs-val" id="rs-size-val">17</span>
+          </div>
+          <div class="rs-row">
+            <span class="rs-label">行高</span>
+            <input id="rs-lh" type="range" min="1.3" max="2.2" step="0.05" />
+            <span class="rs-val" id="rs-lh-val">1.75</span>
+          </div>
+          <div class="rs-row">
+            <span class="rs-label">译文</span>
+            <div class="rs-seg" id="rs-trans">
+              <button data-v="underline">下划线</button>
+              <button data-v="block">色块</button>
+            </div>
+          </div>
+          <div class="rs-tip">设置自动保存，对所有文献生效</div>
+        </div>
+        <!-- 图片灯箱：图表 / 公式 / 表格点开放大 -->
+        <div id="lightbox" hidden title="点击空白或按 Esc 关闭">
+          <img id="lightbox-img" alt="" />
+          <button id="lightbox-close" title="关闭">✕</button>
         </div>
         <nav id="toc-panel" hidden>
           <div class="toc-head">目录</div>

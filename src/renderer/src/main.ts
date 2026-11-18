@@ -2,6 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 import './worker-mgr'
 import './style.css'
 import { initReaderEvents, openReader } from './reader'
+import { initReadPrefs } from './settings'
 import { extractReflowBlocks } from './reflow'
 import type { ReadingMeta } from '../../shared/types'
 
@@ -214,6 +215,7 @@ function init(): void {
   $('#import-btn').addEventListener('click', () => void importFlow())
   $('#search').addEventListener('input', renderShelf)
   initReaderEvents(() => void refreshShelf())
+  initReadPrefs()
   void refreshShelf()
 }
 
