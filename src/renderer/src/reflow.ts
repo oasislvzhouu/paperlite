@@ -380,6 +380,67 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
  *    从正文流剔除、独立排在该页末尾。
  * 2) 剩余行做双栏判定：跨中线整行占比低且左右两侧都有足量行 → 左栏后右栏。
  */
+/** 单栏页里的局部并排区域（Eksp 首页：左 Highlights / 右 Abstract）。
+ *  按 x0 聚簇找「左右两簇、y 范围重叠、各 ≥3 行」的区域，区内先左后右；
+ *  其余行保持 y 序。用聚簇而非逐行配对，容忍两栏行基线不对齐。 */
+function orderLocalColumns(lines: Line[]): Line[] {
+  const topDown = (a: Line, b: Line) => a.yTop - b.yTop || a.x0 - b.x0
+  const byX = [...lines].sort((a, b) => a.x0 - b.x0)
+  const clusters: { lines: Line[]; x0max: number; x1max: number; minY: number; maxY: number }[] = []
+  for (const l of byX) {
+    const c = clusters[clusters.length - 1]
+    if (!c || l.x0 - c.x0max > 12) {
+      clusters.push({ lines: [l], x0max: l.x0, x1max: l.x1, minY: l.yTop, maxY: l.yTop })
+    } else {
+      c.lines.push(l)
+      c.x0max = Math.max(c.x0max, l.x0)
+      c.x1max = Math.max(c.x1max, l.x1)
+      c.minY = Math.min(c.minY, l.yTop)
+      c.maxY = Math.max(c.maxY, l.yTop)
+    }
+  }
+  type Region = { cut: number; y0: number; y1: number; left: Line[]; right: Line[] }
+  const regions: Region[] = []
+  for (let i = 0; i < clusters.length - 1; i++) {
+    const A = clusters[i]
+    const B = clusters[i + 1]
+    const gap = B.lines[0].x0 - A.x1max
+    if (gap < 12 || gap > 120) continue
+    const y0 = Math.max(A.minY, B.minY)
+    const y1 = Math.min(A.maxY, B.maxY)
+    if (y1 - y0 < 40) continue
+    const cut = (A.x1max + B.lines[0].x0) / 2
+    const inY = (l: Line) => l.yTop >= y0 - 4 && l.yTop <= y1 + 4
+    const left = lines.filter((l) => inY(l) && l.x1 <= cut + 2).sort(topDown)
+    const right = lines.filter((l) => inY(l) && l.x0 >= cut - 2).sort(topDown)
+    if (left.length < 3 || right.length < 3) continue
+    regions.push({ cut, y0, y1, left, right })
+  }
+  if (regions.length === 0) return lines
+  // 去重：y 范围重叠的 region 只保留行数多的
+  regions.sort((a, b) => b.left.length + b.right.length - (a.left.length + a.right.length))
+  const kept: Region[] = []
+  for (const r of regions) {
+    if (kept.some((k) => !(r.y1 < k.y0 || r.y0 > k.y1))) continue
+    kept.push(r)
+  }
+  kept.sort((a, b) => a.y0 - b.y0)
+  const inRegion = (l: Line) => kept.find((r) => r.left.includes(l) || r.right.includes(l))
+  const out: Line[] = []
+  const emitted = new Set<Region>()
+  for (const l of [...lines].sort(topDown)) {
+    const r = inRegion(l)
+    if (!r) {
+      out.push(l)
+      continue
+    }
+    if (emitted.has(r)) continue
+    emitted.add(r)
+    out.push(...r.left, ...r.right)
+  }
+  return out
+}
+
 export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number): Line[] {
   const topDown = (a: Line, b: Line) => a.yTop - b.yTop || a.x0 - b.x0
   const body = [...lines].sort(topDown)
@@ -446,7 +507,7 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
   const realSpanning = bodyMain.filter((l) => isSpanning(l) && !isNarrowFormula(l))
   const midFormulas = bodyMain.filter((l) => isSpanning(l) && isNarrowFormula(l))
   if (realSpanning.length >= bodyMain.length * 0.25) {
-    return [...mainSorted, ...sidebar.sort(topDown)] // 大量整行 → 单栏
+    return [...orderLocalColumns(mainSorted), ...sidebar.sort(topDown)] // 大量整行 → 单栏
   }
 
   // 跨栏行（标题/作者/通栏图表）不能进 left/right——此前它们会被双栏判定直接丢弃
@@ -482,7 +543,7 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
       ...sidebar.sort(topDown)
     ]
   }
-  return [...mainSorted, ...sidebar.sort(topDown)]
+  return [...orderLocalColumns(mainSorted), ...sidebar.sort(topDown)]
 }
 
 function levelFor(size: number, bodySize: number): number {
@@ -510,8 +571,14 @@ export function dropRunningHeads(perPage: { lines: Line[]; height: number }[]): 
       .map(([t]) => t)
   )
 
-  return perPage.map(({ lines }) =>
-    lines.filter((l) => !repeated.has(l.text.trim()) && !PAGE_NUMBER_RE.test(l.text))
+  // 页码只在页边（上下 7%）才删：ICLR 的章节号 "1" 单独成行时
+  // 位于页面中部，曾被当页码删掉，标题只剩 "INTRODUCTION"
+  return perPage.map(({ lines, height }) =>
+    lines.filter(
+      (l) =>
+        !repeated.has(l.text.trim()) &&
+        !(PAGE_NUMBER_RE.test(l.text) && (l.yTop < height * 0.07 || l.yTop > height * 0.85))
+    )
   )
 }
 
@@ -548,7 +615,9 @@ function isFormulaLine(l: Line): boolean {
 
 /** 文本模式章节标题：罗马数字/字母编号（"I. INTRODUCTION"、"A. Pseudo-Label"），
  *  IEEE/Elsevier 小写大写章节标题字号与正文相同，字号启发式抓不到 */
-const SECTION_HEADING_RE = /^(?:[IVXLC]{1,5}|[A-Z]|\d{1,2}(?:\.\d{1,2})*)\.\s+\S+/
+// Springer 用 "1 Introduction"（数字后无点）；Elsevier/IEEE 用 "1." / "I."
+const SECTION_HEADING_RE =
+  /^(?:\d{1,2}(?:\.\d{1,2})*\s+[A-Z][A-Za-z]{2,}|(?:[IVXLC]{1,5}|[A-Z]|\d{1,2}(?:\.\d{1,2})*)\.\s+\S+)/
 function isSectionHeadingText(t: string): boolean {
   const s = t.trim()
   if (s.length > 80) return false
@@ -663,7 +732,17 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
         group.every((l) => l.text.trim().length < 40)
       if (!nameRow && !group.some((l) => isMathishLine(l))) continue
       group.sort((a, b) => a.x0 - b.x0)
-      const maxGap = nameRow ? Math.max(30, bodySize * 5) : Math.max(18, bodySize * 2.5)
+      // 组内含散文片段时，横向大缝隙是栏间距而不是行内碎片：
+      // Eksp 首页的 "▪ 高亮条目" 与右侧 Abstract 行同 y、间距 23pt，
+      // 旧阈值 2.5×字号会把它们拼成一条，摘要首行被吞进高亮条目
+      const proseFragment = group.some(
+        (l) => (l.text.match(/[A-Za-z]{3,}/g) ?? []).length >= 4
+      )
+      const maxGap = nameRow
+        ? Math.max(30, bodySize * 5)
+        : proseFragment
+          ? Math.max(10, bodySize * 1.2)
+          : Math.max(18, bodySize * 2.5)
       const runs: Line[][] = []
       let run: Line[] = [group[0]]
       for (let k = 1; k < group.length; k++) {
@@ -884,6 +963,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   // 断词/复合词判定用的词表：PDF 行末连字符既可能是断词（effi- ciency），
   // 也可能是复合词（frequency- domain）。若连字符前的片段本身就是文档里
   // 出现过的词，保留连字符；否则视为断词去掉
+  // 常见构词前缀：trans-forming / inter-action 这类断词，拼回去是完整词
+  const HYPHEN_PREFIX = new Set([
+    'trans', 'inter', 'multi', 'semi', 'micro', 'macro', 'hyper', 'ultra',
+    'electro', 'thermo', 'hydro', 'photo', 'bio', 'geo', 'neuro', 'nano'
+  ])
   const wordCounts = new Map<string, number>()
   for (const l of lines)
     for (const w of l.text.toLowerCase().match(/[a-z]{2,}/g) ?? [])
@@ -892,6 +976,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   // ⓪ 同一基线的视觉整行合并（见 mergeVisualLines：行内数学与公式碎片
   //    都必须在分类前拼回整行）
   mergeVisualLines(lines, bodySize)
+
+    for (const l of lines)
+      if (l.page === 1 && /^(1|INTRODUCTION)$/.test(l.text.trim()))
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
@@ -1050,7 +1137,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       // 参考文献区内不判标题（作者缩写与章节编号模式撞车）
       !inRefZone &&
       // 续行小写开头不是标题（真实标题以大写/数字/CJK 开头）
-      !/^[a-z]/.test(l.text.trim())
+      !/^[a-z]/.test(l.text.trim()) &&
+      // "Correspondence:" 是首页元信息标签，不是章节标题
+      !/^\*?\s*correspondence(?![A-Za-z])/i.test(l.text.trim())
     const headingText = l.text.trim()
     const absOpen = l.page === 1 && /^abstract\s*[—–-]/i.test(headingText)
     const absClose = l.page === 1 && /^index terms\s*[—–-]/i.test(headingText)
@@ -1134,7 +1223,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       // 左片段 ≤3 字母几乎都是断词（hy-phenation），不可能是复合词左半
       const keepHyphen =
         !!acronym ||
-        (lower && !!prevWord && prevWord.length >= 4 && !(joined && (wordCounts.get(joined) ?? 0) > 0))
+        (lower &&
+          !!prevWord &&
+          prevWord.length >= 4 &&
+          !HYPHEN_PREFIX.has(prevWord) &&
+          !(joined && (wordCounts.get(joined) ?? 0) > 0))
       if (lower || acronym) {
         const base = lastT.replace(/\s+$/, '')
         bufT[bufT.length - 1] =
@@ -1159,13 +1252,24 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     // 页脚行（通讯邮箱/doi/版权/收稿日期）不能与上一段或下一页正文粘连：
     // 曾把下一页首段整段吞进 E-mail 块
     const FOOTER_LINE_RE =
-      /e-mail address|^[\w.+-]+@[\w.-]+\.\w{2,}|https?:\/\/doi\.org|©|received \d{1,2}\s+\w+\s+\d{4}|available online/i
+      /e-?mail\s*[:：]|^[\w.+-]+@[\w.-]+\.\w{2,}|https?:\/\/doi\.org|©|received \d{1,2}\s+\w+\s+\d{4}|available online|equal contribution|corresponding author|^citation\s*:|^[A-Z][A-Za-z ]+\s+\d{4},\s*\d+|www\.mdpi\.com|^electronics\s+\d{4}|ORCID/i
     const isFooterLine = (t: string): boolean => FOOTER_LINE_RE.test(t)
+    // 会议论文首页：作者行/单位行/邮箱行/ABSTRACT 标签必须分段，
+    // 否则整块拼成一段（ICLR 的 "…@antgroup.com ABSTRACT"）
+    const tNow = l.text.trim()
+    const prevBuf = bufT[bufT.length - 1] ?? ''
+    const frontMatterBreak =
+      l.page === 1 &&
+      ( /^(?:abstract|highlights|keywords|index terms)$/i.test(tNow) ||
+        /^(?:abstract|highlights|keywords|index terms)$/i.test(prevBuf.trim()) ||
+        (tNow.includes('@') && !prevBuf.includes('@') && bufT.length > 0) ||
+        (/^\d{1,2}[A-Z][a-z]/.test(tNow) && !/^\d{1,2}[A-Z][a-z]/.test(prevBuf.trim())) )
     let brk =
       bufT.length === 0 ||
       kind !== bufKind ||
       isListItem ||
       isCaptionLine ||
+      frontMatterBreak ||
       isFooterLine(l.text) ||
       (bufT.length > 0 && isFooterLine(bufT[bufT.length - 1]))
     // 公式块内的垂直断点：阅读序会把不同公式的碎片排到一起（orderLines
@@ -1232,6 +1336,7 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
 
 
 
+
     if (brk && (bufT.length > 0 || bufImages.length > 0)) flush()
     if (bufT.length === 0) {
       bufPage = l.page
@@ -1264,6 +1369,13 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       prev.kind === 'paragraph' &&
       b.page === prev.page &&
       words <= 4 &&
+      // 会议论文首页的邮箱行/ABSTRACT 标签/单位角标行只有 1-4 个词，
+      // 不能被碎片段合并规则并回作者或单位块
+      !(b.page === 1 &&
+        (b.text.includes('@') ||
+          /^(?:abstract|highlights|keywords|index terms)$/i.test(b.text.trim()) ||
+          /^\d{1,2}[A-Z][a-z]/.test(b.text.trim()) ||
+          /equal contribution|corresponding author/i.test(b.text))) &&
       // 不同区域（比如右栏摘要与左栏单位尾行）的碎片不能并：
       // "Province, China" 曾被并进摘要末尾。但同一基线的词片段
       // （MuPDF 把作者简介拆成逐词行）必须并
@@ -1582,7 +1694,7 @@ function fixElsevierFirstPage(blocks: ReflowBlock[]): void {
   // 按版面上→下排序做判定（数组顺序是阅读序，首页区域是错乱的）
   const byTop = [...p1].sort((a, b) => (a.top ?? 9e9) - (b.top ?? 9e9))
   const MAST =
-    /ScienceDirect|journal homepage|Contents lists|Reliability Engineering|VOL\.?\s*\d+|ISSN|www\.elsevier|l\/locate/i
+    /ScienceDirect|journal homepage|Contents lists|Reliability Engineering|VOL\.?\s*\d+|ISSN|www\.elsevier|l\/locate/i
   for (const b of byTop) if (MAST.test(b.text)) b.role = 'meta'
 
   let maxFs = 0
@@ -1705,7 +1817,7 @@ function fixElsevierFirstPage(blocks: ReflowBlock[]): void {
       b.kind === 'paragraph' &&
       (b.top ?? 9e9) < introTop &&
       !/A\s*B\s*S\s*T\s*R\s*A\s*C\s*T/i.test(b.text.trim().slice(0, 40)) &&
-      !/^keywords/i.test(b.text.trim())
+      !/^keywords(?![A-Za-z])/i.test(b.text.trim())
   )
   const anchor = cand
     .filter((b) => b.text.trim().length >= 60)
@@ -1809,9 +1921,124 @@ function absorbFormulaFragments(blocks: ReflowBlock[], bodySize: number): void {
   }
 }
 
+/** 论文题常被拆成多段（Springer "... via dynamic" + "CAME"），
+ *  且中间可能夹着期刊报头块。按几何位置合并同字号的标题碎片。 */
+function mergeTitleFragments(blocks: ReflowBlock[]): void {
+  const title = blocks
+    .filter((b) => b.page === 1 && b.kind === 'heading' && !b.role)
+    .sort((a, b) => (b.firstFontSize ?? 0) - (a.firstFontSize ?? 0) || (a.top ?? 0) - (b.top ?? 0))[0]
+  if (!title) return
+  const fs = title.firstFontSize ?? 0
+  if (fs <= 0) return
+  for (let pass = 0; pass < 4; pass++) {
+    const last = title.lastTop ?? title.top ?? 0
+    // 标题块本身可能已由行合并拼了 2 行，但没记录 lastTop：
+    // 首轮放宽到 4 行高，否则 Springer 的第三行 "CAME" 超出 2.2 行窗口
+    const window = title.lastTop !== undefined ? fs * 2.2 : fs * 4
+    // 按 y 顺序吸收：标题第 2 行可能因小写开头被拆成独立段，且排在
+    // "CAME" 之后，不能按数组顺序拼
+    const cand = blocks
+      .filter(
+        (b) =>
+          b !== title &&
+          b.page === 1 &&
+          !b.role &&
+          b.kind !== 'table' &&
+          b.kind !== 'formula' &&
+          b.top !== undefined &&
+          b.top > last &&
+          b.top - last <= window &&
+          Math.abs((b.firstFontSize ?? 0) - fs) <= Math.max(1.5, fs * 0.08) &&
+          Math.abs((b.left ?? 0) - (title.left ?? 0)) <= 4 &&
+          b.text.trim().length > 0 &&
+          b.text.trim().length <= 120 &&
+          !/[.!?;:]$/.test(b.text.trim()) &&
+          !/university|school of|@/i.test(b.text)
+      )
+      .sort((a, b) => (a.top ?? 0) - (b.top ?? 0))[0]
+    if (!cand) break
+    title.text = `${title.text} ${cand.text.trim()}`.replace(/\s+/g, ' ').trim()
+    title.html = `${title.html ?? title.text} ${cand.html ?? cand.text}`
+    title.lastTop = cand.top
+    const k = blocks.indexOf(cand)
+    if (k >= 0) blocks.splice(k, 1)
+  }
+}
+
+/** 首页报头杂项：RESEARCH / 旋转裁切的 volV 乱码 / 作者脚注标记
+ *  （"Y. Keshun ◆L. Zengwei ◆G. Yingkui (&)"）降级 meta */
+function markFrontMatterJunk(blocks: ReflowBlock[]): void {
+  for (const b of blocks) {
+    if (b.page !== 1) continue
+    if (b.role && b.role !== 'list-item') continue
+    const t = b.text.trim()
+    const junkHeader = /^(?:research(?: article)?|article|review(?: article)?|original article|case report|editorial)$/i.test(t) ||
+      /^(?:eksploatacja|volume\s+\d+|vol\.?\s*\d+|journal homepage|indexed by|article citation info|e?-?issn)(?![A-Za-z])/i.test(t)
+    const rotated = (b.firstFontSize ?? 1) === 0 || (/volV/i.test(t) && t.length < 40)
+    const tinyMeta = (b.firstFontSize ?? 99) <= 6 && t.length < 140
+    const orcid = /ORCID/i.test(t)
+    const citationLine =
+      b.page === 1 &&
+      (b.top ?? 999) < 160 &&
+      t.length > 40 &&
+      (/doi\.org|https?:\/\//i.test(t) ||
+        ((b.firstFontSize ?? 99) <= 9 &&
+          (t.match(/,/g) ?? []).length >= 3 &&
+          !/university|school|department|institute|@/i.test(t)))
+    const authorNote = /^[A-Z]\.\s+[A-Z][A-Za-z]+.*(?:◆|�|\(&\))/.test(t)
+    if (junkHeader || rotated || authorNote || citationLine || tinyMeta || orcid) {
+      if (b.kind === 'heading') b.kind = 'paragraph'
+      b.role = 'meta'
+    }
+  }
+  // 首页 meta（报头/版权/收稿日期）统一放到页 1 末尾
+  const metas = blocks.filter((b) => b.page === 1 && b.role === 'meta')
+  if (metas.length > 0 && blocks.some((b) => b.page === 1 && b.role !== 'meta')) {
+    for (const m of metas) {
+      const k = blocks.indexOf(m)
+      if (k >= 0) blocks.splice(k, 1)
+    }
+    let last = 0
+    for (let i = 0; i < blocks.length; i++) if (blocks[i].page === 1) last = i + 1
+    blocks.splice(last, 0, ...metas)
+  }
+}
+
 /** 首页版式修复：作者行碎片合并、无数学内容的 formula 降级、
  *  版权块后移、跨栏摘要续接（对标 Scholaread 的首页区域模型）。 */
+/** 单位尾行（"102249, China"）被拆成独立段时并回前一个单位/作者块 */
+function mergeAffiliationTails(blocks: ReflowBlock[]): void {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (b.page !== 1 || b.kind !== 'paragraph' || b.role) continue
+    const t = b.text.trim()
+    if (!/^\d{4,6}[,.]?\s+[A-Z][A-Za-z]/.test(t) || t.split(/\s+/).length > 3) continue
+    // 单位块可能因阅读序排在关键词之后：找最近的、位于其上方且含单位名的块
+    let pIdx = -1
+    for (let j = i - 1; j >= 0; j--) {
+      const p = blocks[j]
+      if (p.page !== 1 || b.top === undefined || p.top === undefined) continue
+      if (b.top - p.top > 260) break
+      if ((p.kind === 'paragraph' || p.kind === 'heading') && /university|school|institute|college|department|academy/i.test(p.text)) {
+        pIdx = j
+        break
+      }
+    }
+    if (pIdx < 0) continue
+    const p = blocks[pIdx]
+    if (!p.text.includes(t)) {
+      p.text = `${p.text} ${t}`.replace(/\s+/g, ' ').trim()
+      p.html = `${p.html ?? p.text} ${b.html ?? t}`
+    }
+    blocks.splice(i, 1)
+  }
+}
+
 function fixFirstPageLayout(blocks: ReflowBlock[]): void {
+  // 先标记报头垃圾（否则字最大的期刊名会被当成论文题），再合并标题碎片
+  markFrontMatterJunk(blocks)
+  mergeAffiliationTails(blocks)
+  mergeTitleFragments(blocks)
   // Elsevier 模板（报头 + ARTICLE INFO 框）走专用路径
   const isElsevier = blocks.some(
     (b) => b.page === 1 && /(A\s?R\s?T\s?I\s?C\s?L\s?E\s+I\s?N\s?F\s?O|Contents lists available at ScienceDirect)/i.test(b.text)
@@ -1850,7 +2077,7 @@ function fixFirstPageLayout(blocks: ReflowBlock[]): void {
 
   // ③ 版权/许可等块移到第 1 页末尾（其原位置会切断摘要）
   const META_RE =
-    /©|all rights reserved|licensed use|rights\/index|IEEE permission|publications\/rights|e-mail address|https?:\/\/doi\.org|available online|received \d{1,2}\s+\w+\s+\d{4}|is with the|are with|also with|digital object identifier|date of publication|corresponding author|^[\w.+-]+@[\w.-]+\.\w{2,}/i
+    /©|all rights reserved|licensed use|rights\/index|IEEE permission|publications\/rights|e-mail address|https?:\/\/doi\.org|available online|received \d{1,2}\s+\w+\s+\d{4}|is with the|are with|also with|digital object identifier|date of publication|corresponding author|equal contribution|^[\w.+-]+@[\w.-]+\.\w{2,}/i
   for (const b of blocks) {
     if (b.page === 1 && b.kind === 'paragraph' && !b.role && META_RE.test(b.text)) b.role = 'meta'
   }
@@ -2860,7 +3087,8 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
       !/[.!?;:）)"']$/.test(a.text.trim()) &&
       // REFERENCES 标题是全大写，会被 all-caps 续行分支误并入前段尾部
       !REFERENCES_HEADING_RE.test(b.text.trim()) &&
-      (/^[a-z(]/.test(b.text.trim()) || /^[A-Z]{2,}/.test(b.text.trim()))
+      (/^[a-z(]/.test(b.text.trim()) ||
+        (/^[A-Z]{2,}/.test(b.text.trim()) && !/^(?:abstract|keywords|index terms)$/i.test(b.text.trim())))
     ) {
       a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ')
       a.html = `${a.html ?? a.text} ${b.html ?? b.text}`
@@ -2901,7 +3129,7 @@ export function applyElsevierFirstPageTemplate(lines: Line[]): void {
   const introLine = sorted.find((l) => /^1\.\s+introduction/i.test(l.text.trim()))
 
   for (const l of sorted) {
-    if (/ScienceDirect|journal homepage|Contents lists|Reliability Engineering|VOL\.?\s*\d+|ISSN|www\.elsevier/i.test(l.text)) {
+    if (/ScienceDirect|journal homepage|Contents lists|Reliability Engineering|VOL\.?\s*\d+|ISSN|www\.elsevier/i.test(l.text)) {
       l.forceKind = 'meta'
     }
   }
@@ -3297,6 +3525,7 @@ const REFS_END_HEADING_RE = /^\s*(appendix|appendices|supplementary|acknowledge?
  *  排到栏尾，落进文献条目流中间。移回几何位置——同栏、yTop 在其下方的
  *  第一条文本行之前；并打 isRefStart 标记让 linesToBlocks 强制起新块。 */
 export function reorderReferenceHeading(lines: Line[]): void {
+
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
     if (!REFERENCES_HEADING_RE.test(l.text.trim())) continue

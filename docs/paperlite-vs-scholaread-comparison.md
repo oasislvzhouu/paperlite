@@ -95,3 +95,27 @@ and Domain Adaptation Ability on Raw Vibration Signals**（21 页，单栏，
 复测：第 1/3/6 页结构与 Scholaread 一致；公式 (1)(5)(6)(7) 完整（含分子），
 列表项、二级标题 `2.1.` 独立。两边都缺 MDPI 的矢量插图（Fig.1-3 在其转换
 产物里也是破图），属共同限制。
+
+---
+
+## 第四批：4 篇不同版式抽查（Springer / ICLR / Eksp / MDPI）
+
+从 Scholaread 的 75 篇已转换论文里再取 4 篇导入本库（reading 10–13），
+只对照第 1–2 页的首页/阅读序，记录通用性修复：
+
+| 论文 | 版式 | 主要问题 | 修复 |
+|---|---|---|---|
+| A performance-interpretable intelligent fusion…（Nonlinear Dyn, Springer, 38p） | 首页通栏标题 + 双栏摘要/关键词 | 期刊名前导块字号最大被当标题；标题第三行 "CAME" 独立成 h1；"1 Introduction"（数字后无点）没识别 | 先标记报头 meta 再合并标题；标题碎片按 y 序合并；`SECTION_HEADING_RE` 支持 `1 Introduction` |
+| TIME-LLM（ICLR 2024, 24p） | 单栏会议论文 | 作者/单位/邮箱/`ABSTRACT` 粘成一段；章节号 "1" 单独一行被当页码删掉；作者脚注混入正文 | 首页作者/单位/邮箱/ABSTRACT 标签强制分段；页码只删页边 7%；`equal contribution/corresponding author` 视为 footer/meta |
+| An Explainable and Adaptive Anomaly Detection…（Eksp. i Niezawodnosc, 18p） | 首页左 Highlights / 右 Abstract 并排 + 下方通栏正文 | 期刊报头/Volume/Indexed by 当正文；标题第二行被拆走；摘要首行被高亮条目吞并；ORCID 脚注混入引言；单位尾行重复 | 报头/citation/ORCID 规则；标题碎片按 y 合并；散文片段同 y 合并的横向阈值收紧到 1.2×字号（栏间距 23pt 不再误拼）；单位尾行并入最近单位块（去重） |
+| Multimodal LLM-Based Fault Detection…（MDPI Electronics, 30p） | MDPI 单栏 | `* Correspondence:` 被当标题；Citation/Electronics 页脚行混入正文；6pt 引用块游离 | Correspondence 不判标题；`Citation:`/`Electronics YYYY`/`www.mdpi.com` 加入 footer/meta；≤6pt 首页小块视为 meta |
+
+**共性修复**：
+- 首页 meta（报头/版权/收稿日期）统一移到第 1 页末尾，不再插在标题与作者之间；
+- 短碎片尾合并规则增加豁免：邮箱行、`ABSTRACT/Keywords/Highlights` 标签、单位角标行、equal contribution 脚注；
+- 页脚行不得跨页续接（`e-mail:` 行曾把下一页首句吞进 meta）；
+- 清理了源码里 4 处被 heredoc 转义破坏成 0x08 的正则（`VOL`/`keywords`/`issn`/`correspondence`），
+  这类损坏会让规则静默失效——本次 Eksp 的报头识别失败即由此暴露。
+
+**仍存在**：MDPI 矢量插图双方都缺；MDPI2 的 `Electronics 2024…` 页脚行仍会并进引言首段一行（后续
+需在 block 级按 footer 前缀拆分）；Eksp 正文在 PDF 页边界处断段（连续重排的取舍）。
