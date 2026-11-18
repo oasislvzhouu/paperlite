@@ -44,8 +44,8 @@ const KEY = 'pl.read.settings.v1'
 const DEFAULTS: ReadSettings = {
   theme: 'dark',
   font: 'ebgaramond',
-  size: 17,
-  lh: 1.75,
+  size: 16,
+  lh: 1.55,
   trans: 'block',
   lang: 'zh-CN',
   para: 'academic',

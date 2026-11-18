@@ -571,6 +571,30 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
     }
     for (const group of groups) {
       if (group.length < 2) continue
+      // 首字下沉（drop cap）：单个大写字母 + 大字号，与紧邻的同基线正文
+      // 合并成一个词（"B" + "EARINGS" → "BEARINGS"）。必须在"数学行门控"
+      // 之前处理——整组没有数学记号会被门控整体跳过
+      {
+        const gp = [...group].sort((a, b) => a.x0 - b.x0)
+        for (let k = 1; k < gp.length; k++) {
+          const a = gp[k - 1]
+          const b = gp[k]
+          if (
+            /^[A-Z]$/.test(a.text.trim()) &&
+            a.fontSize > (b.fontSize || 0) * 1.8 &&
+            b.x0 - a.x1 < 14
+          ) {
+            b.text = `${a.text.trim()}${b.text.trimStart()}`
+            b.x0 = a.x0
+            b.rich = undefined
+            b.html = b.text
+            a.skip = true
+            const gi = group.indexOf(a)
+            if (gi >= 0) group.splice(gi, 1)
+          }
+        }
+        if (group.length < 2) continue
+      }
       if (!group.some((l) => isMathishLine(l))) continue
       group.sort((a, b) => a.x0 - b.x0)
       const runs: Line[][] = []
@@ -585,7 +609,25 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
       }
       runs.push(run)
       for (const r of runs) {
+        if ((globalThis as { __plDropDbg?: boolean }).__plDropDbg && r.some((x) => /EARINGS|^B$/.test(x.text.trim())))
+          console.log('[drop]', 'n=' + r.length, r.map((x) => JSON.stringify(x.text.slice(0, 14)) + '@' + x.x0.toFixed(0) + '/fs' + x.fontSize.toFixed(0)).join(' '))
         if (r.length < 2) continue
+        // 首字下沉（drop cap）：单个大写字母 + 大字号，紧邻同基线正文 →
+        // 拼成一个词（"B" + "EARINGS" → "BEARINGS"），字号取正文
+        const first = r[0]
+        const second = r[1]
+        if (
+          /^[A-Z]$/.test(first.text.trim()) &&
+          first.fontSize > (second.fontSize || 0) * 1.8 &&
+          r.length === 2
+        ) {
+          second.text = `${first.text.trim()}${second.text.trimStart()}`
+          second.x0 = first.x0
+          second.rich = undefined // 文本已改，旧的富文本 HTML 与之不符
+          second.html = second.text
+          for (const f of r) if (f !== second) f.skip = true
+          continue
+        }
         const head = r[0]
         head.text = r
           .map((f) => f.text.trim())
@@ -594,6 +636,9 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
           .replace(/\s+/g, ' ')
           .trim()
         head.html = head.text
+        // 合并后文本由多片段拼成，原 rich 只覆盖首片段 → 清空退回纯文本，
+        // 否则渲染出来的文字会少于块文本（首字下沉的 "B" 曾因此丢失）
+        head.rich = undefined
         head.x0 = Math.min(...r.map((f) => f.x0))
         head.x1 = Math.max(...r.map((f) => f.x1))
         head.eqNumbered = r.some((f) => f.eqNumbered)
@@ -612,7 +657,52 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
 /** 行流 → 语义块（标题/段落/公式/图片） */
 export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   // 自适应段距阈值：实际行距（众数）+ 30% 余量；下限 0.35×字号防过敏
-  const paraGap = Math.max(bodySize * 0.35, estimateLeading(lines, bodySize) + bodySize * 0.3)
+  // 段距阈值：排版 1.4 行距的 PDF 段距仅比行距大 2-4pt，
+  // 0.3×字号 的余量会与段距重叠（实测漏掉 MSF-DFormer 的 Meanwhile 段）
+  const paraGap = Math.max(bodySize * 0.35, estimateLeading(lines, bodySize) + Math.max(1.5, bodySize * 0.18))
+  // 每页的 flush-left 基线（x0 直方图众数）：排版缩进可能只有 10pt，
+  // 用「1.6×字号」阈值会漏掉（实测 MSF-DFormer 正文 8pt、缩进 10pt）。
+  // 双栏页有两个基线（左栏/右栏），按 x0 直方图找出所有高频起点。
+  const flushBases = new Map<number, number[]>()
+  {
+    const byPage = new Map<number, Line[]>()
+    for (const l of lines) {
+      const arr = byPage.get(l.page)
+      if (arr) arr.push(l)
+      else byPage.set(l.page, [l])
+    }
+    for (const [pg, arr] of byPage) {
+      const hist = new Map<number, number>()
+      let bodyCount = 0
+      for (const l of arr) {
+        if (l.fontSize < bodySize * 0.85 || l.fontSize > bodySize * 1.2) continue
+        bodyCount++
+        const x = Math.round(l.x0)
+        hist.set(x, (hist.get(x) ?? 0) + 1)
+      }
+      if (bodyCount === 0) continue
+      const minCount = Math.max(3, Math.round(bodyCount * 0.08))
+      let bases = [...hist.entries()]
+        .filter(([, n]) => n >= minCount)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([x]) => x)
+        .sort((a, b) => a - b)
+      // 相邻基线（<20pt）合并为同一栏
+      bases = bases.filter((b, i) => i === 0 || b - bases[i - 1] >= 20)
+      if (bases.length === 0) bases = [Math.min(...arr.map((l) => l.x0))]
+      flushBases.set(pg, bases)
+    }
+  }
+  /** 该行所属栏的基线（不超过该行 x0 的最大基线） */
+  const baseOf = (l: Line): number | undefined => {
+    const bases = flushBases.get(l.page)
+    if (!bases) return undefined
+    let best: number | undefined
+    for (const b of bases) if (b <= l.x0 + 1) best = b
+    return best ?? bases[0]
+  }
+
   const blocks: ReflowBlock[] = []
   const isHeadingSize = (s: number) => s > bodySize * 1.18 && s >= 11.5
 
@@ -620,6 +710,8 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   let bufH: string[] = []
   let bufPage = 1
   let bufKind: 'heading' | 'paragraph' | 'formula' = 'paragraph'
+  /** 当前缓冲区是否由列表项起头（"1) xxx" / "(a) xxx"） */
+  let bufIsList = false
   let bufLevel = 0
   let bufImages: string[] = []
   let bufLines: Line[] = []
@@ -693,6 +785,7 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     bufT = []
     bufH = []
     bufLines = []
+    bufIsList = false
   }
 
   // ── 公式散件预处理 ──
@@ -919,7 +1012,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     const isListItem =
       kind === 'paragraph' && !inRefZone && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
 
-    let brk = bufT.length === 0 || kind !== bufKind || isListItem
+    // 图注/表注独占一段（"Fig. 1. …" 曾被并入上一段正文）
+    const isCaptionLine = kind === 'paragraph' && /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)/i.test(l.text)
+    let brk = bufT.length === 0 || kind !== bufKind || isListItem || isCaptionLine
     // 公式块内的垂直断点：阅读序会把不同公式的碎片排到一起（orderLines
     // 的栏桶），其间可能隔着整段正文。相邻公式行 y 跨度超过 1.6 行高就
     // 必须切块——否则 rect 横跨两式之间的正文（实测公式 (11) 裁图里
@@ -949,14 +1044,41 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       // 豁免引用标记 "[n]"↔条目文本的 x 跳变（标记 x0=48 文本 x0=67），
       // 否则标记被劈成独立块再粘到上一条结尾（"[8]" 插句中的根因）
       const isCitLine = (t: string) => /^\[\s*\d{1,3}\s*\]$/.test(t.trim())
-      const dx = l.x0 - prev.x0
-      if (dx > bodySize * 1.6 && dx < bodySize * 4.5 && !isCitLine(l.text) && !isCitLine(prev.text)) brk = true
+      // 列表项结束后回到 flush-left 且大写开头 = 新段落
+      //（"1) Sensor SCRM: … Fig. 3(a)." 后的 "In this section…" 曾被吞进列表项）
+      if (bufIsList && /^[A-Z]/.test(l.text.trim())) {
+        const b0 = baseOf(l)
+        if (b0 !== undefined && Math.abs(l.x0 - b0) <= 1.5) brk = true
+      }
+      const cit = isCitLine(l.text) || isCitLine(prev.text)
+      // 换栏：上一行在本栏底部、下一行跳到另一栏顶部 → 必然是段落边界，
+      // 除非上行以连字符结尾或下行小写续接（真正的跨栏续段）
+      const bCur = baseOf(l)
+      const bPrev = baseOf(prev)
+      if (bCur !== undefined && bPrev !== undefined && bCur !== bPrev) {
+        const continues = /[-‐–]$/.test(prev.text.trim()) || (!/[.!?;:]$/.test(prev.text.trim()) && /^[a-z(]/.test(l.text.trim()))
+        if (!continues) brk = true
+      }
+      if (!cit && !brk) {
+        // ① 相对本栏基线的首行缩进（>=2.5pt 即段首；实测 10pt 缩进）
+        const b = baseOf(l)
+        const bp = baseOf(prev)
+        const sameBase = b !== undefined && bp === b
+        if (b !== undefined && sameBase && l.x0 - b >= 2.5) brk = true
+        else {
+          // ② 旧启发式兜底（无基线数据时）
+          const dx = l.x0 - prev.x0
+          if (dx > bodySize * 1.6 && dx < bodySize * 4.5) brk = true
+        }
+      }
     }
 
     if (brk && (bufT.length > 0 || bufImages.length > 0)) flush()
     if (bufT.length === 0) {
       bufPage = l.page
       bufKind = kind
+      // 列表项前缀与长度无关（"1) Sensor SCRM: …" 可能很长，但不是短列表项）
+      bufIsList = kind === 'paragraph' && LIST_ITEM_RE.test(l.text.trim())
       bufLevel = heading
         ? isSectionHeadingLine(l)
           ? /^[IVXLC]/.test(l.text.trim())
@@ -1276,6 +1398,113 @@ function structureFirstPage(blocks: ReflowBlock[]): void {
       }
     }
   }
+}
+
+/** 首页版式修复：作者行碎片合并、无数学内容的 formula 降级、
+ *  版权块后移、跨栏摘要续接（对标 Scholaread 的首页区域模型）。 */
+function fixFirstPageLayout(blocks: ReflowBlock[]): void {
+  const absIdx = blocks.findIndex((b) => b.page === 1 && b.role === 'abstract')
+  if (absIdx < 0) return
+
+  // ① 第 1 页被误当公式的作者碎片（"…Guo ( ) , Hua ( ) , Member, IEEE"）降级
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]
+    if (b.kind !== 'formula' || b.page !== 1) continue
+    if (b.top !== undefined && b.top > 260) continue // 摘要之后的公式不动
+    if (/[=+×÷≈≤≥]/.test(b.text)) continue
+    if (!/[A-Za-z]{3,}/.test(b.text)) continue
+    b.kind = 'paragraph'
+    b.role = b.role ?? 'authors'
+    delete b.rect
+    delete b.geo
+    delete b.textLines
+  }
+
+  // ② 相邻作者碎片合并为一段
+  for (let i = blocks.length - 2; i >= 0; i--) {
+    const a = blocks[i]
+    const b = blocks[i + 1]
+    if (a.role === 'authors' && b.role === 'authors' && a.page === 1 && b.page === 1) {
+      a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
+      a.html = `${a.html ?? a.text} ${b.html ?? b.text}`
+      blocks.splice(i + 1, 1)
+    }
+  }
+
+  // ③ 版权/许可等块移到第 1 页末尾（其原位置会切断摘要）
+  const META_RE = /©|all rights reserved|licensed use|rights\/index|IEEE permission|publications\/rights/i
+  for (const b of blocks) {
+    if (b.page === 1 && b.kind === 'paragraph' && !b.role && META_RE.test(b.text)) b.role = 'meta'
+  }
+  const metas = blocks.filter((b) => b.page === 1 && b.role === 'meta')
+  if (metas.length > 0) {
+    for (const m of metas) {
+      const k = blocks.indexOf(m)
+      if (k >= 0) blocks.splice(k, 1)
+    }
+    let ins = blocks.findIndex((b) => b.page > 1)
+    if (ins < 0) ins = blocks.length
+    blocks.splice(ins, 0, ...metas)
+  }
+
+  // ④ 摘要区重整：把摘要与关键词之间的段按「续接 / 作者 / 其它」分类
+  //    - 小写开头的段落 = 跨栏/跨页续接 → 并回摘要（连字符直拼）
+  //    - 作者/单位碎片 → 并入 authors 块（放在摘要之后）
+  const ai2 = blocks.findIndex((b) => b.role === 'abstract')
+  if (ai2 < 0) return
+  let ki = blocks.findIndex((b) => b.role === 'keywords')
+  if (ki < 0) ki = blocks.length
+  const between = blocks.slice(ai2 + 1, ki).filter((b) => b.page === 1)
+  const names: ReflowBlock[] = []
+  for (const b of between) {
+    if (b.kind !== 'paragraph') continue
+    if (b.role === 'authors' || b.role === 'affiliation') {
+      names.push(b)
+      continue
+    }
+    if (b.role && b.role !== 'para-cont') continue
+    const curT = b.text.trim()
+    if (!/^[a-z]/.test(curT)) continue
+    // 单位/邮箱/基金等不是摘要续接（曾把 "the School of Automation…" 拼进摘要）
+    const AFFIL =
+      /university|institute|department|college|laboratory|school of|academy|e-?mail|@[a-z0-9.-]+\.[a-z]{2,}|foundation|grant|project no/i
+    if (AFFIL.test(curT)) continue
+    const prev = blocks[ai2]
+    const prevT = prev.text.trim()
+    prev.text = /-$/.test(prevT) ? `${prevT.slice(0, -1)}${curT}` : `${prevT} ${curT}`
+    prev.html = `${prev.html ?? prevT} ${b.html ?? curT}`
+    const k = blocks.indexOf(b)
+    if (k >= 0) blocks.splice(k, 1)
+    ki--
+  }
+  // 关键词块重新标记（原结构判断依赖旧位置）
+  const kiNow = blocks.findIndex((b) => b.page === 1 && /^index terms\s*[—–-]/i.test(b.text.trim()))
+  if (kiNow >= 0) blocks[kiNow].role = 'keywords'
+  // 作者碎片统一并到摘要前面的 authors 块（没有则并到第一片）
+  if (names.length > 0) {
+    const pre = blocks.slice(0, ai2).find((b) => b.role === 'authors')
+    if (pre) {
+      for (const r of names) {
+        if (r === pre) continue
+        pre.text = `${pre.text} ${r.text}`.replace(/\s+/g, ' ').trim()
+        pre.html = `${pre.html ?? pre.text} ${r.html ?? r.text}`
+        const k = blocks.indexOf(r)
+        if (k >= 0) blocks.splice(k, 1)
+      }
+      names.length = 0
+    }
+  }
+  if (names.length > 0) {
+    const first = names[0]
+    const rest = names.slice(1)
+    for (const r of rest) {
+      first.text = `${first.text} ${r.text}`.replace(/\s+/g, ' ').trim()
+      first.html = `${first.html ?? first.text} ${r.html ?? r.text}`
+      const k = blocks.indexOf(r)
+      if (k >= 0) blocks.splice(k, 1)
+    }
+  }
+
 }
 
 /** 主入口：整本 PDF → 重排语义块序列 */
@@ -1705,10 +1934,12 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   mergeFormulaClusters(blocks, bodySize)
   mergeOrphanFragments(blocks)
   structureFirstPage(blocks)
+  fixFirstPageLayout(blocks)
   demoteFootnotes(blocks, bodySize)
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  splitHeadingBody(blocks)
   markReferences(blocks)
   // 丢弃落在表格/算法裁图矩形内的短段落：表注的多行标题（"EMUs."）会被
   // 单独留成段落，而裁图已把它包含进像素 → 页面出现重复文字
@@ -1743,6 +1974,39 @@ function dropTextInsideAtomicCrops(blocks: ReflowBlock[]): void {
         b.top! <= t.rect!.y1 + 1
     )
     if (inside) blocks.splice(i, 1)
+  }
+}
+
+/** 标题块吞正文的修复：个别 PDF 把小节标题与正文首行放在同一行
+ *  （如 "I. INTRODUCTION B EARINGS are critical components…"），
+ *  标题块会整段吞下正文。这里在第一个句末边界拆开：
+ *  前半保留 heading，后半还原为 paragraph（含首字下沉断字修正）。 */
+function splitHeadingBody(blocks: ReflowBlock[]): void {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (b.kind !== 'heading') continue
+    const t = b.text.trim()
+    if (t.length < 40) continue
+    // 句末 + 大写首词的从句（标题本身不会以英文句子收尾）
+    const m = /^([^]{1,60}?[.!?])\s+([A-Z]\s+[A-Za-z]{4,}.*)$/.exec(t)
+    if (!m) continue
+    const head = m[1].trim()
+    let body = m[2].trim()
+    // 首字下沉断字："B EARINGS" → "BEARINGS"
+    body = body.replace(/^([A-Z])\s+([A-Z]{3,})/, '$1$2')
+    if (head.length < 8 || body.length < 20) continue
+    b.text = head
+    b.html = head
+    const para: ReflowBlock = {
+      kind: 'paragraph',
+      page: b.page,
+      text: body,
+      html: body,
+      top: b.top,
+      firstFontSize: b.firstFontSize
+    }
+    const bi = blocks.indexOf(b)
+    blocks.splice(bi + 1, 0, para)
   }
 }
 
@@ -1906,6 +2170,7 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  splitHeadingBody(blocks)
   markReferences(blocks)
   return blocks
 }
