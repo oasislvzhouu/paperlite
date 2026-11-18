@@ -50,6 +50,7 @@
             <button id="width-btn" title="切换版面宽度">宽</button>
             <button id="font-dec" title="缩小字号">字−</button>
             <button id="font-inc" title="放大字号">字＋</button>
+            <button id="notes-btn" title="笔记与高亮侧栏"><span>笔</span><i id="notes-count" class="badge">0</i></button>
             <button id="settings-btn" title="阅读设置（主题 / 字体 / 行高 / 译文样式）">Aa</button>
           </div>
           <div class="zoomer">
@@ -102,6 +103,14 @@
           <img id="lightbox-img" alt="" />
           <button id="lightbox-close" title="关闭">✕</button>
         </div>
+        <!-- 笔记与高亮侧栏 -->
+        <aside id="notes-panel" hidden>
+          <div class="notes-head">
+            <span>笔记与高亮</span>
+            <button id="notes-close" title="收起侧栏">✕</button>
+          </div>
+          <div id="notes-list"></div>
+        </aside>
         <nav id="toc-panel" hidden>
           <div class="toc-head">目录</div>
           <div id="toc-list"></div>

@@ -7,6 +7,8 @@ import { applyHighlights, initHighlightEvents, loadHighlights } from './highligh
 import { recreatePdfWorker } from './worker-mgr'
 import { isPollutedLatex } from './llm-shared'
 import { applySettings, getSettings, updateSettings } from './settings'
+import { initCitationEvents, linkCitations } from './citations'
+import { initNotesPanel } from './notes-panel'
 
 type Mode = 'reflow' | 'original'
 
@@ -293,6 +295,8 @@ function renderReflow(): void {
   article.innerHTML = parts.join('\n')
   reflowFont = getSettings().size
   applySettings()
+  // 引用角标转链接（只改结构不改文本，highlight 偏移不受影响）
+  linkCitations()
   article.classList.remove('show-trans', 'has-trans')
 }
 
@@ -1193,6 +1197,8 @@ function initSearchEvents(): void {
 export function initReaderEvents(refreshShelf: () => void): void {
   initSearchEvents()
   initHighlightEvents(() => readingId)
+  initCitationEvents()
+  initNotesPanel()
   $('#back-btn').addEventListener('click', () => {
     closeReader()
     refreshShelf()

@@ -19,6 +19,22 @@ let currentColor = 'yellow'
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
 
+/** 当前文献的高亮/笔记（只读快照，供笔记侧栏渲染） */
+export function getHighlightRows(): HlRow[] {
+  return rows
+}
+
+const changeListeners: Array<() => void> = []
+
+/** 订阅高亮数据变更（新增/编辑/删除/重新加载后触发），跨文献持续有效 */
+export function onHighlightsChanged(cb: () => void): void {
+  changeListeners.push(cb)
+}
+
+function notifyChanged(): void {
+  for (const cb of changeListeners) cb()
+}
+
 export async function loadHighlights(readingId: number): Promise<void> {
   try {
     rows = await window.paperlite.listHighlights(readingId)
@@ -73,6 +89,7 @@ export function applyHighlights(): void {
       cursor = e
     }
   }
+  notifyChanged()
 }
 
 function wrapRange(el: HTMLElement, s: number, e: number, r: HlRow): void {
