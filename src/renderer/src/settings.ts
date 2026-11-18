@@ -17,6 +17,8 @@ export type FontKey =
   | 'song'
 export type TransStyle = 'underline' | 'block'
 export type TargetLang = 'zh-CN' | 'zh-TW' | 'en' | 'ja' | 'ko'
+/** 段落排版风格：学术（无首行缩进/左对齐，对标 Scholaread）/ 中文（首行缩进+两端对齐） */
+export type ParaStyle = 'academic' | 'cjk'
 
 export interface ReadSettings {
   theme: Theme
@@ -29,6 +31,8 @@ export interface ReadSettings {
   trans: TransStyle
   /** 译文目标语言 */
   lang: TargetLang
+  /** 段落排版风格 */
+  para: ParaStyle
 }
 
 const KEY = 'pl.read.settings.v1'
@@ -39,7 +43,8 @@ const DEFAULTS: ReadSettings = {
   size: 17,
   lh: 1.75,
   trans: 'block',
-  lang: 'zh-CN'
+  lang: 'zh-CN',
+  para: 'academic'
 }
 
 /** 字体栈：前四项为随包开源字体（EB Garamond / Linux Libertine / Lato /
@@ -76,7 +81,8 @@ function read(): ReadSettings {
       lang:
         p.lang === 'zh-TW' || p.lang === 'en' || p.lang === 'ja' || p.lang === 'ko'
           ? p.lang
-          : 'zh-CN'
+          : 'zh-CN',
+      para: p.para === 'cjk' ? 'cjk' : 'academic'
     }
   } catch {
     return { ...DEFAULTS }
@@ -93,6 +99,7 @@ export function applySettings(): void {
     article.style.setProperty('--read-lh', String(state.lh))
     article.style.setProperty('--font-article', FONTS[state.font])
     article.dataset.transStyle = state.trans
+    article.dataset.para = state.para
   }
 }
 
@@ -121,6 +128,7 @@ export function syncPanel(): void {
   if (fontSel) fontSel.value = state.font
   const langSel = document.querySelector<HTMLSelectElement>('#rs-lang')
   if (langSel) langSel.value = state.lang
+  seg('rs-para', state.para)
   const size = document.querySelector<HTMLInputElement>('#rs-size')
   const sizeVal = document.querySelector<HTMLElement>('#rs-size-val')
   if (size) size.value = String(state.size)
@@ -161,6 +169,9 @@ export function initReadPrefs(): void {
   })
   document.querySelector('#rs-lang')?.addEventListener('change', (e) => {
     updateSettings({ lang: (e.target as HTMLSelectElement).value as TargetLang })
+  })
+  document.querySelectorAll<HTMLButtonElement>('#rs-para button').forEach((b) => {
+    b.addEventListener('click', () => updateSettings({ para: b.dataset.v as ParaStyle }))
   })
   document.querySelectorAll<HTMLButtonElement>('#rs-trans button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ trans: b.dataset.v as TransStyle }))

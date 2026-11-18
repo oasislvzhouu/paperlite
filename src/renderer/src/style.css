@@ -1318,3 +1318,35 @@ body.reflow-mode .zoomer { display: none; }
   font-size: 12.5px;
 }
 .info-actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ═══ 段落排版预设（Phase 4.2，对标 Scholaread 的段落模型） ═══════════
+ * 学术：无首行缩进、左对齐、不用连字符（原文即如此，段距承担分段）；
+ * 中文：首行缩进 2em、两端对齐、允许连字符。 */
+#reflow-article[data-para='academic'] p {
+  text-indent: 0;
+  text-align: left;
+  hyphens: manual;
+  margin: 0 0 1.15em;
+}
+#reflow-article[data-para='cjk'] p {
+  text-indent: 2em;
+  text-align: justify;
+  hyphens: auto;
+  margin: 1em 0;
+}
+/* 标题：字号由 PDF 原始比例内联给出，这里只统一间距与字重 */
+#reflow-article h1,
+#reflow-article h2,
+#reflow-article h3,
+#reflow-article h4 {
+  font-weight: 700;
+  letter-spacing: 0.1px;
+}
+/* 内联富文本（原文粗体/斜体）：不要额外样式，只保证继承正文字体 */
+#reflow-article p b,
+#reflow-article p i,
+#reflow-article h1 b,
+#reflow-article h2 b,
+#reflow-article h3 i {
+  font-family: inherit;
+}

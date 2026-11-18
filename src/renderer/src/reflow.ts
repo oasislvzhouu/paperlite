@@ -33,6 +33,8 @@ export interface ReflowBlock {
   top?: number
   /** 首行字号（脚注检测用） */
   firstFontSize?: number
+  /** 标题相对正文字号的比例（来自 PDF 原始字号，渲染时用作 em 尺寸） */
+  fontScale?: number
   /** 元数据角色：首页结构化 + 全文图注 + 算法框原子块 + 参考文献条目 */
   role?:
     | 'title'
@@ -99,6 +101,8 @@ export interface Line {
   x1: number
   fontSize: number
   text: string
+  /** 富文本内联 HTML（保留原文的粗体/斜体/上下标，来自 MuPDF asHTML） */
+  rich?: string
   /** 数学字体字符的宽度占比 */
   mathRatio: number
   /** 数学 Unicode 字符数占非空白字符比 */
@@ -651,6 +655,11 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         block.top = bufLines[0].yTop
         block.firstFontSize = bufLines[0].fontSize
       }
+      // 标题保留 PDF 原始字号比例（对标 Scholaread 的 adjustable_fsN：
+      // 各级标题大小来自原文而非固定 em 阶梯）
+      if (block.kind === 'heading' && block.firstFontSize && bodySize > 0) {
+        block.fontScale = Math.min(2.1, Math.max(1.02, block.firstFontSize / bodySize))
+      }
       if (block.kind === 'paragraph' && LIST_ITEM_RE.test(text.trim()) && text.length < 160 && !/^([IVXLC]{1,5})\./.test(text.trim())) block.role = 'list-item'
       blocks.push(block)
     }
@@ -930,7 +939,7 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       bufLines = []
     }
     bufT.push(l.text)
-    bufH.push(l.html)
+    bufH.push(l.rich ?? l.html)
     bufLines.push(l)
   }
   flush()
@@ -1243,7 +1252,7 @@ function structureFirstPage(blocks: ReflowBlock[]): void {
 
 /** 主入口：整本 PDF → 重排语义块序列 */
 export interface MupdfPageLike {
-  toStructuredText: () => { asJSON: () => string }
+  toStructuredText: () => { asJSON: () => string; asHTML?: (zoom?: number) => string }
   getBounds: () => number[]
 }
 
@@ -1473,11 +1482,72 @@ export function clusterFormulas(lines: Line[], bodySize: number): void {
   lines.push(...out)
 }
 
+
+/* ── 富文本内联格式（对标 Scholaread 的原字体排版）──
+ * MuPDF 的 asJSON() 只给逐行一个字体，丢失行内的粗体/斜体/上下标；
+ * asHTML(1) 给出 span 级字体并带 <b>/<i>/<sup>/<sub>。
+ * 这里把 asHTML 的 <p> 行解析成 map，按 (y, x, 文本前缀) 与 JSON 行对齐，
+ * 只保留内联格式标签、丢掉所有 style（尺寸由我们自己的排版控制）。 */
+export interface RichLine {
+  y: number
+  x: number
+  plain: string
+  inner: string
+}
+
+function sanitizeInline(html: string): string {
+  // 先去掉 MuPDF 的 span 包装（带 style），再按白名单处理所有剩余标签：
+  // 白名单（b/i/sup/sub/u）丢掉属性保留标签，其他标签整段删除。
+  const out = html
+    .replace(/<span[^>]*>/gi, '')
+    .replace(/<\/span>/gi, '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<(\/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*>/g, (_m, slash: string, tag: string) => {
+      const t = tag.toLowerCase()
+      return ['b', 'i', 'sup', 'sub', 'u'].includes(t) ? `<${slash}${t}>` : ''
+    })
+  return out.replace(/\s+/g, ' ').trim()
+}
+
+export function parseRichLines(html: string): RichLine[] {
+  const out: RichLine[] = []
+  const re = /<p style="top:([\d.]+)pt;left:([\d.]+)pt[^>]*>([\s\S]*?)<\/p>/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    const inner = sanitizeInline(m[3])
+    if (!inner) continue
+    out.push({
+      y: Number(m[1]),
+      x: Number(m[2]),
+      plain: m[3]
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim(),
+      inner
+    })
+  }
+  return out
+}
+
 export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<ReflowBlock[]> {
   const perPage: { lines: Line[]; height: number; width: number }[] = []
   const imgRects: Array<{ page: number; x0: number; y0: number; x1: number; y1: number }> = []
   for (let p = 0; p < pages.length; p++) {
-    const stext = JSON.parse(pages[p].toStructuredText().asJSON())
+    const stObj = pages[p].toStructuredText()
+    const stext = JSON.parse(stObj.asJSON())
+    // 富文本行（span 级字体）：解析失败不影响主流程
+    let richLines: RichLine[] = []
+    try {
+      const toHtml = stObj.asHTML
+      if (typeof toHtml === 'function') richLines = parseRichLines(String(toHtml.call(stObj, 1)))
+    } catch {
+      richLines = []
+    }
     // 图像块边界（插图）：图内文字（流程图标签/结构图公式）会被文本层
     // 当成 formula 块单独裁图，形成"插图上叠一排重复小图" —— 用图像 bbox
     // 在提取阶段过滤，不依赖 pdf.js 渲染管线是否可用
@@ -1543,6 +1613,14 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
           if (/[\u2200-\u22FF\u2190-\u21FF\u2A00-\u2AFF\u{1D400}-\u{1D7FF}\u0370-\u03FF]/u.test(ch)) mathChars++
         }
         const chars = text.replace(/\s/g, '')
+        // 匹配同基线、同左边界、同前缀的富文本行
+        const rich =
+          richLines.find(
+            (r) =>
+              Math.abs(r.y - bb.y) <= 1.6 &&
+              Math.abs(r.x - bb.x) <= 3 &&
+              r.plain.slice(0, 20) === text.slice(0, 20)
+          )?.inner
         lines.push({
           page: p + 1,
           yTop: bb.y,
@@ -1550,6 +1628,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
           x1: bb.x + bb.w,
           fontSize: bb.h,
           text,
+          rich,
           html: text.replace(/[&<>"]/g, (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c])),
           mathRatio: 0,
           charMathRatio: chars.length ? mathChars / chars.length : 0,

@@ -435,7 +435,9 @@ function renderReflow(): void {
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
       const roleCls = b.role ? ` ${b.role}` : ''
-      parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}">${body}</h${lvl}>`)
+      // 标题字号用 PDF 原始比例（em），保留原文的层级视觉差
+      const fs = b.fontScale ? ` style="font-size:${(b.fontScale * (lvl === 1 ? 1.35 : 1)).toFixed(2)}em"` : ''
+      parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}"${fs}>${body}</h${lvl}>`)
     } else {
       const roleCls = b.role ? ` ${b.role}` : ''
       parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}">${body}</p>`)
