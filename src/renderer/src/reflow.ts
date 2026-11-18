@@ -41,6 +41,10 @@ export interface ReflowBlock {
   bold?: boolean
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
+  /** 块末行底部（pt）：用于图注上方的矢量图区域推断 */
+  bottom?: number
+  /** 块末行右边界（pt） */
+  right?: number
   /** 首行字号（脚注检测用） */
   firstFontSize?: number
   /** 标题相对正文字号的比例（来自 PDF 原始字号，渲染时用作 em 尺寸） */
@@ -385,7 +389,12 @@ function fragsToLines(frags: Frag[], pageHeight: number, page: number): Line[] {
  *  其余行保持 y 序。用聚簇而非逐行配对，容忍两栏行基线不对齐。 */
 function orderLocalColumns(lines: Line[]): Line[] {
   const topDown = (a: Line, b: Line) => a.yTop - b.yTop || a.x0 - b.x0
-  const byX = [...lines].sort((a, b) => a.x0 - b.x0)
+  // 悬挂列表的编号行 "(1)" 是行内标记，不是独立栏；参与聚簇会被误判成
+  // 左栏并把列表项排到正文前面
+  const isMarker = (l: Line) =>
+    /^\(\d{1,2}\)$/.test(l.text.trim()) || /^\d{1,2}[.)]$/.test(l.text.trim())
+  const detectable = lines.filter((l) => !isMarker(l))
+  const byX = [...detectable].sort((a, b) => a.x0 - b.x0)
   const clusters: { lines: Line[]; x0max: number; x1max: number; minY: number; maxY: number }[] = []
   for (const l of byX) {
     const c = clusters[clusters.length - 1]
@@ -419,8 +428,8 @@ function orderLocalColumns(lines: Line[]): Line[] {
     if (y1 - y0 < 40) continue
     const cut = (leftMaxX1 + bX0) / 2
     const inY = (l: Line) => l.yTop >= y0 - 4 && l.yTop <= y1 + 4
-    const left = lines.filter((l) => inY(l) && l.x1 <= cut + 2).sort(topDown)
-    const right = lines.filter((l) => inY(l) && l.x0 >= cut - 2).sort(topDown)
+    const left = detectable.filter((l) => inY(l) && l.x1 <= cut + 2).sort(topDown)
+    const right = detectable.filter((l) => inY(l) && l.x0 >= cut - 2).sort(topDown)
     if (left.length < 3 || right.length < 3) continue
     regions.push({ cut, y0, y1, left, right })
   }
@@ -746,9 +755,12 @@ export function mergeVisualLines(lines: Line[], bodySize: number): void {
       const proseFragment = group.some(
         (l) => (l.text.match(/[A-Za-z]{3,}/g) ?? []).length >= 4
       )
+      // 列表编号 "(1)" / "1)" 与同一视觉行的正文必须合并（栏距收紧规则
+      // 曾把它们拆开，编号被当成公式、列表文本丢标记）
+      const markerRow = group.some((l) => /^\(\d{1,2}\)$/.test(l.text.trim()) || /^\d{1,2}[.)]$/.test(l.text.trim()))
       const maxGap = nameRow
         ? Math.max(30, bodySize * 5)
-        : proseFragment
+        : proseFragment && !markerRow
           ? Math.max(10, bodySize * 1.2)
           : Math.max(18, bodySize * 2.5)
       const runs: Line[][] = []
@@ -918,6 +930,8 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       }
       if (bufLines[0]) {
         block.top = bufLines[0].yTop
+        block.bottom = Math.max(...bufLines.map((l) => l.yTop + Math.max(l.fontSize, 6)))
+        block.right = Math.max(...bufLines.map((l) => l.x1))
         block.firstFontSize = bufLines[0].fontSize
         block.left = bufLines[0].x0
         if (block.kind === 'heading' && bufLines.length >= 2) {
@@ -984,9 +998,6 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
   // ⓪ 同一基线的视觉整行合并（见 mergeVisualLines：行内数学与公式碎片
   //    都必须在分类前拼回整行）
   mergeVisualLines(lines, bodySize)
-
-    for (const l of lines)
-      if (l.page === 1 && /^(1|INTRODUCTION)$/.test(l.text.trim()))
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
@@ -1347,6 +1358,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
 
 
 
+    if ((globalThis as { __plL?: boolean }).__plL && l.page === 3 && /^(A comparison|improved by|raw noisy signals|classification by)/.test(l.text.trim()))
+      console.log('[l]', JSON.stringify(l.text.slice(0,22)), 'brk', brk, 'list', bufIsList, 'x0', l.x0, 'prevx0', lines[i-1]?.x0, 'fs', l.fontSize, lines[i-1]?.fontSize, 'gap', l.yTop-(lines[i-1]?.yTop||0)-(lines[i-1]?.fontSize||0), 'last', JSON.stringify((bufT[bufT.length-1]||'').slice(-16)))
+
     if (brk && (bufT.length > 0 || bufImages.length > 0)) flush()
     if (bufT.length === 0) {
       bufPage = l.page
@@ -1490,7 +1504,14 @@ export async function cropPageImages(
   page: import('pdfjs-dist').PDFPageProxy,
   viewportW: number,
   viewportH: number,
-  ops: PdfOpsCodes
+  ops: PdfOpsCodes,
+  extraRegions: Array<{
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+    mask?: Array<{ x0: number; y0: number; x1: number; y1: number }>
+  }> = []
 ): Promise<Line[]> {
   if (typeof document === 'undefined') return []
   // 顺序关键：先 render 再 getOperatorList。反序（oplist→render）会在真 worker 上
@@ -1533,9 +1554,16 @@ export async function cropPageImages(
     return null
   })
   if (!opList) return []
-  const rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops, viewportW, viewportH)
+  let rects: ImgRect[] = []
+  try {
+    rects = extractImageRects(opList.fnArray, opList.argsArray as unknown[][], ops, viewportW, viewportH)
+  } catch {
+    // 没有图片算子的页面曾在这里抛错，导致整个 cropPageImages 被跳过，
+    // 连带后面的矢量图区域裁剪也不执行
+    rects = []
+  }
   g.__plImgRects = { ...(g.__plImgRects ?? {}), [page.pageNumber]: rects.length }
-  if (rects.length === 0) return []
+  if (rects.length === 0 && extraRegions.length === 0) return []
 
   const lines: Line[] = []
   // 聚类合并：一幅图常由多个图片对象拼成（如网络结构图的部件、分层条带），
@@ -1594,6 +1622,107 @@ export async function cropPageImages(
       wordCount: 0,
       eqNumbered: false,
       image: out.toDataURL('image/jpeg', 0.92)
+    })
+  }
+  // 矢量插图（无 paintImage 算子）：按图注上方的空白区域裁剪，像素裁剪白边。
+  // MDPI/Springer/ICLR 的结构图、流程图都是矢量绘制，opList 里没有图片对象。
+  for (const reg of extraRegions) {
+    const x0 = Math.max(0, reg.x0)
+    const x1 = Math.min(viewportW, reg.x1)
+    const y0 = Math.max(0, reg.y0)
+    const y1 = Math.min(viewportH, reg.y1)
+    if (x1 - x0 < 40 || y1 - y0 < 30) continue
+    // 与已裁图片矩形大面积重叠 → 已有位图，跳过
+    const covered = clusters.some((c) => {
+      const ix = Math.max(0, Math.min(c.x1, x1) - Math.max(c.x0, x0))
+      const iy = Math.max(0, Math.min(c.y1, y1) - Math.max(c.y0, y0))
+      return ix * iy > (x1 - x0) * (y1 - y0) * 0.4
+    })
+    if (covered) continue
+    const sx = x0 * scale
+    // extraRegions 用 top-down 坐标（与 ReflowBlock.top 一致），
+    // 而图片算子矩形是 bottom-up；这里不能套用图片的翻转公式
+    const sy = y0 * scale
+    const sw = (x1 - x0) * scale
+    const sh = (y1 - y0) * scale
+    const out = document.createElement('canvas')
+    out.width = Math.max(1, Math.floor(sw))
+    out.height = Math.max(1, Math.floor(sh))
+    const octx = out.getContext('2d')
+    if (!octx) continue
+    octx.fillStyle = '#fff'
+    octx.fillRect(0, 0, out.width, out.height)
+    octx.drawImage(canvas, sx, sy, sw, sh, 0, 0, out.width, out.height)
+    // 白边裁剪：找非白像素包围盒
+    let ix0 = out.width
+    let iy0 = out.height
+    let ix1 = -1
+    let iy1 = -1
+    try {
+      const data = octx.getImageData(0, 0, out.width, out.height).data
+      for (let y = 0; y < out.height; y++) {
+        for (let x = 0; x < out.width; x++) {
+          const k = (y * out.width + x) * 4
+          if (data[k] < 245 || data[k + 1] < 245 || data[k + 2] < 245) {
+            // 屏蔽正文/图注文字区域，只保留矢量绘图/图片像素
+            if (reg.mask) {
+              const px = x0 + x / scale
+              const py = y0 + y / scale
+              if (
+                reg.mask.some(
+                  (m) => px >= m.x0 - 1 && px <= m.x1 + 1 && py >= m.y0 - 1 && py <= m.y1 + 1
+                )
+              )
+                continue
+            }
+            if (x < ix0) ix0 = x
+            if (x > ix1) ix1 = x
+            if (y < iy0) iy0 = y
+            if (y > iy1) iy1 = y
+          }
+        }
+      }
+    } catch (e) {
+      continue
+    }
+    if (ix1 < 0) {
+      // 没检测到墨迹时保留整块区域（浅色矢量图），由用户视觉判断
+      ix0 = 0
+      iy0 = 0
+      ix1 = out.width - 1
+      iy1 = out.height - 1
+    }
+    if (ix1 - ix0 < 20 || iy1 - iy0 < 20) continue
+    const tw = ix1 - ix0 + 3
+    const th = iy1 - iy0 + 3
+    const trimmed = document.createElement('canvas')
+    trimmed.width = tw
+    trimmed.height = th
+    const tctx = trimmed.getContext('2d')
+    if (!tctx) continue
+    tctx.fillStyle = '#fff'
+    tctx.fillRect(0, 0, tw, th)
+    tctx.drawImage(out, ix0, iy0, tw, th, 0, 0, tw, th)
+    const rx0 = x0 + ix0 / scale
+    const rx1 = x0 + (ix1 + 1) / scale
+    const ry0 = y0 + iy0 / scale
+    const ry1 = y0 + (iy1 + 1) / scale
+    void ry1
+    lines.push({
+      page: 0,
+      yTop: ry0,
+      x0: rx0,
+      x1: rx1,
+      fontSize: 0,
+      text: '',
+      html: '',
+      mathRatio: 0,
+      charMathRatio: 0,
+      shortFragRatio: 0,
+      fragCount: 1,
+      wordCount: 0,
+      eqNumbered: false,
+      image: trimmed.toDataURL('image/jpeg', 0.92)
     })
   }
   const g2 = globalThis as { __plImgLines?: Record<number, number> }
@@ -2026,7 +2155,7 @@ function mergeParagraphsAroundMeta(blocks: ReflowBlock[]): void {
     const b = blocks[j]
     if (!b || b.page !== a.page || b.kind !== 'paragraph' || b.role) continue
     if (/[.!?;:]$/.test(a.text.trim())) continue
-    if (!/^[a-z(]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
+    if (!/^[a-z(,]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
     const aT = a.text.trim()
     const aH = (a.html ?? aT).replace(/\s+$/, '')
     const bT = b.text.trim()
@@ -2054,7 +2183,7 @@ function mergePageBoundaryParagraphs(blocks: ReflowBlock[]): void {
     const b = blocks[j]
     if (!b || b.page !== a.page + 1 || b.kind !== 'paragraph' || b.role) continue
     if (/[.!?;:)"'”]$/.test(a.text.trim())) continue
-    if (!/^[a-z(]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
+    if (!/^[a-z(,]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
     const aT = a.text.trim()
     const aH = (a.html ?? aT).replace(/\s+$/, '')
     const bT = b.text.trim()
@@ -2702,7 +2831,9 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   // 公式走几何聚类（不走文本缓冲区）；表格/算法/正文路径不变
   clusterFormulas(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
+  mergeFormulaLines(blocks, bodySize)
   mergeFormulaClusters(blocks, bodySize)
+  demoteProseFormulas(blocks)
   mergeOrphanFragments(blocks)
   structureFirstPage(blocks)
   fixFirstPageLayout(blocks)
@@ -2952,6 +3083,14 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
       if (!gapOk) break
       const mathy = prev.mathRatio >= 0.25 || prev.charMathRatio >= 0.1 || (prev.shortFragRatio >= 0.5 && prev.fragCount >= 4)
       if (!mathy) break
+      // 行内数学句（"input to a BN layer x = (x(1),…)"）不是 display 公式：
+      // 含 2 个以上普通英文词的上一行不吸收为公式主体
+      const prose = (prev.text.match(/[A-Za-z]{4,}/g) ?? []).filter(
+        (w) =>
+          !/^(?:sigma|tanh|exp|max|min|log|arg|sample|softmax|sigmoid|relu|concat|softplus|where|and|then|follows|respectively)$/i.test(w) &&
+          /[aeiou]/i.test(w)
+      )
+      if (prose.length >= 2) break
       prev.eqCollect = true
     }
     // 公式区（zone）：上下正文行之间 × 所在栏宽。LLM 裁图用完整区域，
@@ -2981,7 +3120,9 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   detectTableZones(ordered, bodySize)
   detectAlgorithms(ordered, bodySize)
   const blocks = linesToBlocks(ordered, bodySize)
+  mergeFormulaLines(blocks, bodySize)
   mergeFormulaClusters(blocks, bodySize)
+  demoteProseFormulas(blocks)
   mergeOrphanFragments(blocks)
   structureFirstPage(blocks)
   demoteFootnotes(blocks, bodySize)
@@ -2997,6 +3138,75 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
 /** 相邻公式碎片块聚类：同栏垂直间距 ≤18pt 的 formula 块/短碎片段
  *  归并为一个公式块（多行 display 公式被行聚类拆散的修复）。
  *  gap > 18pt 视为独立元素（段距/独立公式），不合并 */
+/** 含 2 个以上普通英文词的"公式"其实是行内数学句（"input to a BN layer
+ *  x = (x(1),…)"）——降级为正文，避免整句被裁成公式图。 */
+function demoteProseFormulas(blocks: ReflowBlock[]): void {
+  const MATH_WORDS =
+    /^(?:sigma|tanh|exp|max|min|log|arg|sample|softmax|sigmoid|relu|concat|softplus|where|and|then|follows|respectively)$/i
+  for (const b of blocks) {
+    if (b.kind !== 'formula') continue
+    const words = (b.text.match(/[A-Za-z]{4,}/g) ?? []).filter(
+      (w) => !MATH_WORDS.test(w) && /[aeiou]/i.test(w)
+    )
+    if (words.length >= 2) {
+      b.kind = 'paragraph'
+      delete b.rect
+      delete b.geo
+      delete b.textLines
+    }
+  }
+}
+
+/** 同一基线的公式块被短碎片段隔开时（MDPI 的 (2)(3) 式：左半 / 碎片 / 右半 + 编号），
+ *  跨过 ≤20 字符的无角色碎片把公式块并成一张裁图；编号块也并入。 */
+function mergeFormulaLines(blocks: ReflowBlock[], bodySize: number): void {
+  for (let i = 0; i < blocks.length; i++) {
+    const a = blocks[i]
+    if (a.kind !== 'formula' || !a.rect || a.top === undefined) continue
+    let j = i + 1
+    let guard = 0
+    while (j < blocks.length && guard++ < 4) {
+      const b = blocks[j]
+      if (!b || b.page !== a.page || b.top === undefined) break
+      const dy = b.top - a.top
+      if (dy < -6 || dy > bodySize * 4) break
+      if (b.kind === 'formula') {
+        const unionW = b.rect
+          ? Math.max(a.rect.x1, b.rect.x1) - Math.min(a.rect.x0, b.rect.x0)
+          : 0
+        if (unionW > 540) break
+        a.text = `${a.text} ${b.text}`.replace(/\s+/g, ' ').trim()
+        if (b.html) a.html = `${a.html ?? ''} ${b.html}`.trim()
+        if (b.rect) {
+          a.rect = {
+            x0: Math.min(a.rect.x0, b.rect.x0),
+            x1: Math.max(a.rect.x1, b.rect.x1),
+            y0: Math.min(a.rect.y0, b.rect.y0),
+            y1: Math.max(a.rect.y1, b.rect.y1)
+          }
+        }
+        blocks.splice(j, 1)
+        continue
+      }
+      // 碎片段：短、无角色、与公式 y 重叠、x 在公式附近 → 仅扩 rect，不保留文本
+      if ((b.kind === 'paragraph' || b.kind === 'heading') && !b.role && b.text.trim().length <= 20 && b.text.trim().length > 0) {
+        const x: number = b.left ?? a.rect.x0
+        const nearX = x >= a.rect.x0 - 24 && x <= a.rect.x1 + 120
+        if (!nearX) break
+        a.rect = {
+          x0: Math.min(a.rect.x0, x),
+          x1: Math.max(a.rect.x1, x + Math.max(12, b.text.trim().length * bodySize * 0.5)),
+          y0: Math.min(a.rect.y0, (b.top ?? a.rect.y0) - 2),
+          y1: Math.max(a.rect.y1, (b.top ?? a.rect.y1) + bodySize * 1.4)
+        }
+        blocks.splice(j, 1)
+        continue
+      }
+      break
+    }
+  }
+}
+
 function mergeFormulaClusters(blocks: ReflowBlock[], bodySize: number): void {
   let i = 1
   while (i < blocks.length) {

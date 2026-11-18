@@ -594,10 +594,74 @@ async function attachImages(): Promise<void> {
     try {
       const page = await doc.getPage(p)
       const vp = page.getViewport({ scale: 1 })
+      // 矢量图区域：图注上方的空白带（上一块底部 → 图注顶部）
+      const pageBlocks = (blocks ?? []).filter((b) => b.page === p && b.top !== undefined)
+      const regions: Array<{
+        x0: number
+        y0: number
+        x1: number
+        y1: number
+        mask?: Array<{ x0: number; y0: number; x1: number; y1: number }>
+      }> = []
+      for (const cap of pageBlocks) {
+        if (!/^\s*fig(?:ure)?\.?\s*\d+/i.test(cap.text)) continue
+        if (cap.top === undefined) continue
+        const prev = pageBlocks
+          .filter((b) => b !== cap && b.top !== undefined && b.top < cap.top! - 2 && b.kind !== 'image')
+          .sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
+        if (!prev || prev.kind === 'formula') continue
+        // 图注上方找最后一段"正文"（≥6 词、宽度≥半栏）作为图区上界；
+        // 图内标签通常词少/窄，不参与，避免把图本身裁掉
+        const bodyLike = pageBlocks.filter(
+          (b) =>
+            (b.kind === 'paragraph' || b.kind === 'heading') &&
+            b.top !== undefined &&
+            b.bottom !== undefined &&
+            b.right !== undefined &&
+            b.left !== undefined &&
+            b.top < cap.top! - 2 &&
+            (b.text.trim().split(/\s+/).filter(Boolean).length >= 6) &&
+            b.right - b.left >= vp.width * 0.5
+        )
+        const prevBody = bodyLike.sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
+        // 图注上方若先有表格（Table 3 + Figure 9 这种），从表格底部开始裁，
+        // 避免把整张表格并进图区（MDPI 第 13 页曾把 Table 3 和 Figure 9 裁成一张）
+        const tableAbove = pageBlocks
+          .filter(
+            (b) =>
+              b.kind === 'table' &&
+              b.rect &&
+              b.top !== undefined &&
+              b.top < cap.top! &&
+              cap.top! - b.rect.y1 < 420
+          )
+          .sort((a, b) => (b.rect?.y1 ?? 0) - (a.rect?.y1 ?? 0))[0]
+        const baseY = prevBody?.bottom ?? 0
+        const tableY = tableAbove?.rect?.y1 ?? 0
+        const y0 = Math.max(0, Math.max(baseY, tableY) + 2, cap.top - 380)
+        const y1 = cap.top - 4
+        if (y1 - y0 < 40) continue
+        const left = Math.min(prev.left ?? cap.left ?? 30, cap.left ?? 30)
+        const right = Math.max(prev.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
+        const area = (right - left) * (y1 - y0)
+        const covered = pageBlocks.some((b) => {
+          if (b.kind !== 'table' || !b.rect) return false
+          const ix = Math.max(0, Math.min(b.rect.x1, right) - Math.max(b.rect.x0, left))
+          const iy = Math.max(0, Math.min(b.rect.y1, y1) - Math.max(b.rect.y0, y0))
+          return area > 0 && ix * iy > area * 0.6
+        })
+        if (covered) continue
+        // 只屏蔽正文块（≥6 词、宽行）；图内标签不屏蔽
+        const mask = bodyLike
+          .filter((b) => (b.top ?? 0) >= y0 - 2 && (b.top ?? 0) <= y1 + 2)
+          .map((b) => ({ x0: b.left!, y0: b.top! - 1, x1: b.right!, y1: b.bottom! + 1 }))
+        regions.push({ x0: left - 4, y0, x1: right + 4, y1, mask })
+      }
+      // 单页 12s 护栏：某页 pdf.js 算子列表卡死时不能让整本后续页都不补图
       const imgs = await Promise.race([
-        cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS),
+        cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS, regions),
         new Promise<Array<{ yTop: number; x0: number; x1: number; image?: string }>>((resolve) =>
-          setTimeout(() => resolve([]), 15000)
+          setTimeout(() => resolve([]), 12000)
         )
       ])
       for (const im of imgs) {
