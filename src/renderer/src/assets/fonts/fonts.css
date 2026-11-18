@@ -1,0 +1,58 @@
+/* 随包字体（SIL OFL / Apache-2.0，见 docs/fonts-LICENSE.md）。
+ * 仅覆盖拉丁字形：中文由字体栈后续的宋体/系统字体回退。 */
+@font-face {
+  font-family: 'EB Garamond';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./EBGaramond-Regular.otf') format('opentype');
+}
+@font-face {
+  font-family: 'EB Garamond';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./EBGaramond-Italic.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Linux Libertine';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./LinuxLibertine-Regular.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Linux Libertine';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./LinuxLibertine-Italic.otf') format('opentype');
+}
+@font-face {
+  font-family: 'Lato';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./Lato-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Lato';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./Lato-Bold.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Lato';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./Lato-Italic.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Open Sans';
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+  src: url('./OpenSans-Variable.ttf') format('truetype-variations');
+}

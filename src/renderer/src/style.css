@@ -1,3 +1,4 @@
+@import './assets/fonts/fonts.css';
 :root {
   /* 主题令牌：默认深色。配色参照 Scholaread 阅读层（--srd-*）：
      文字层次 #dcdcdc/#b2b2b2/#666，主色紫罗兰，护眼为暖纸色 */
@@ -1052,3 +1053,99 @@ body.reflow-mode .zoomer { display: none; }
 /* 笔记侧栏展开时让出正文空间（对标 Scholaread 的双栏挤压而非覆盖） */
 #reader.notes-open #reflow-wrap { padding-right: 342px; }
 #reader.notes-open #reflow-article { max-width: min(var(--reflow-width), calc(100vw - 380px)); }
+
+/* 字体下拉（随包字体选择） */
+.rs-select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.rs-select:focus { border-color: var(--accent); }
+
+/* 反向高亮：正文里被某条参考文献引用的全部位置 */
+#reflow-article a.cite.cite-hit {
+  background: var(--accent);
+  color: #fff;
+  animation: cite-pulse 1.4s ease-out;
+}
+@keyframes cite-pulse {
+  0% { box-shadow: 0 0 0 3px var(--accent-weak); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* 侧栏标签页 + 颜色筛选 */
+.notes-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+}
+.notes-tabs button {
+  flex: 1;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px 7px 0 0;
+  border-bottom: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.notes-tabs button i {
+  font-style: normal;
+  font-size: 10.5px;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+.notes-tabs button.on {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  border-color: var(--accent);
+}
+.notes-colors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.notes-colors button {
+  min-width: 26px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.notes-colors button.on {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+.note-edit {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.note-edit:hover { background: var(--panel); color: var(--accent); }
+.note-item.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak);
+}

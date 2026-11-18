@@ -51,16 +51,77 @@ function splitNode(node: Text): void {
   node.parentNode?.replaceChild(frag, node)
 }
 
-/** 点击引用角标 → 跳到参考文献条目 */
+/** 当前反向高亮的编号（null = 未激活） */
+let activeCite: string | null = null
+
+function clearCiteHits(): void {
+  activeCite = null
+  document
+    .querySelectorAll<HTMLElement>('#reflow-article a.cite.cite-hit')
+    .forEach((a) => a.classList.remove('cite-hit'))
+}
+
+/** 反向高亮：把正文里所有引用 [n] 的位置标出来 */
+function markCiteHits(n: string): number {
+  clearCiteHits()
+  const hits = [
+    ...document.querySelectorAll<HTMLElement>(`#reflow-article a.cite[data-cite="${n}"]`)
+  ]
+  for (const a of hits) a.classList.add('cite-hit')
+  activeCite = hits.length > 0 ? n : null
+  return hits.length
+}
+
+/** 条目文本 → 引用编号（允许 "REFERENCES [1] …" 前缀；取前 120 字符首个 [n]） */
+function numberOfEntry(el: HTMLElement): string | null {
+  const head = (el.textContent ?? '').slice(0, 120)
+  const m = head.match(/\[(\d{1,3})\]/)
+  return m ? m[1] : null
+}
+
+/** 点击引用角标 → 跳到参考文献条目；点击参考文献条目 → 反向高亮正文引用 */
 export function initCitationEvents(): void {
   const article = document.querySelector<HTMLElement>('#reflow-article')
   if (!article) return
+
   article.addEventListener('click', (e) => {
     const a = (e.target as HTMLElement).closest<HTMLElement>('a.cite')
-    if (!a) return
-    e.preventDefault()
-    e.stopPropagation()
-    jumpToRef(a.dataset['cite'] ?? '', a)
+    if (a) {
+      e.preventDefault()
+      e.stopPropagation()
+      const n = a.dataset['cite'] ?? ''
+      // 双向联动：正跳转 + 反向标出所有同号引用
+      const count = markCiteHits(n)
+      jumpToRef(n, a)
+      if (count > 1) toast(`[${n}] 在正文中共 ${count} 处`)
+      return
+    }
+    const entry = (e.target as HTMLElement).closest<HTMLElement>('p.ref-entry')
+    if (!entry) return
+    // 正在选词时不触发（避免打断高亮操作）
+    const sel = window.getSelection()
+    if (sel && !sel.isCollapsed) return
+    const n = numberOfEntry(entry)
+    if (!n) return
+    if (activeCite === n) {
+      clearCiteHits()
+      return
+    }
+    const count = markCiteHits(n)
+    if (count === 0) {
+      toast(`正文中没有引用 [${n}]`)
+      return
+    }
+    const first = document.querySelector<HTMLElement>(`#reflow-article a.cite.cite-hit`)
+    first?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    toast(`正文中共 ${count} 处引用 [${n}]，再次点击该条目可取消`)
+  })
+
+  // 点击空白处取消反向高亮
+  document.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement
+    if (t.closest('a.cite') || t.closest('p.ref-entry')) return
+    if (activeCite !== null) clearCiteHits()
   })
 }
 

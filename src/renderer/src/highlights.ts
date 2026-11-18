@@ -169,6 +169,20 @@ function openNoteEditor(x: number, y: number, row?: HlRow): void {
   $('#note-text').focus()
 }
 
+/** 从侧栏编辑某条高亮的批注/颜色（定位到正文 mark 弹出编辑器） */
+export function editHighlightById(id: number): void {
+  const row = rows.find((r) => r.id === id)
+  if (!row) return
+  const mark = document.querySelector<HTMLElement>(
+    `#reflow-article mark.hl[data-hid="${id}"]`
+  )
+  const rect = mark?.getBoundingClientRect()
+  const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2
+  const y = rect ? Math.max(120, rect.top) : 160
+  if (mark) mark.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  openNoteEditor(x, y, row)
+}
+
 export function initHighlightEvents(getReadingId: () => number): void {
   const article = $('#reflow-article')
 
@@ -219,6 +233,8 @@ export function initHighlightEvents(getReadingId: () => number): void {
     const rect = mark.getBoundingClientRect()
     e.stopPropagation()
     openNoteEditor(rect.left + rect.width / 2, rect.top, row)
+    // 正文 → 侧栏联动：让侧栏滚动到这一条并高亮卡片
+    document.dispatchEvent(new CustomEvent('pl:hl-focus', { detail: { id: row.id } }))
   })
 
   document.querySelectorAll('#note-pop .swatch').forEach((s) =>

@@ -1,11 +1,19 @@
 /**
- * 笔记侧栏（对标 Scholaread 的右侧批注面板）：
- * 汇总当前文献的全部高亮/笔记，按正文顺序列出，点击跳转、可删除。
- * 数据来自 highlights 模块（SQLite 持久化），新增/编辑/删除后自动刷新。
+ * 笔记侧栏（对标 Scholaread 右侧批注面板）：
+ * - 三个标签：全部 / 批注（有笔记文字）/ 高亮
+ * - 颜色筛选（黄/绿/蓝）
+ * - 每条：颜色点、页码、引文、笔记正文；✎ 编辑、✕ 删除
+ * - 与正文双向联动：点条目 → 正文闪烁定位；点正文高亮 → 侧栏滚动到该条
  */
-import { getHighlightRows, onHighlightsChanged } from './highlights'
+import { editHighlightById, getHighlightRows, onHighlightsChanged, type HlRow } from './highlights'
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
+
+type Tab = 'all' | 'note' | 'hl'
+type ColorFilter = 'all' | 'yellow' | 'green' | 'blue'
+
+let tab: Tab = 'all'
+let colorFilter: ColorFilter = 'all'
 
 /** 高亮所在块的页码（沿 DOM 向前找最近的 .page-sep） */
 function pageOfBlock(bi: number): number | null {
@@ -28,26 +36,48 @@ function esc(s: string): string {
   )
 }
 
+function filtered(): HlRow[] {
+  let rows = getHighlightRows()
+  if (tab === 'note') rows = rows.filter((r) => r.note.trim().length > 0)
+  if (tab === 'hl') rows = rows.filter((r) => r.note.trim().length === 0)
+  if (colorFilter !== 'all') rows = rows.filter((r) => r.color === colorFilter)
+  return [...rows].sort((a, b) => a.block_index - b.block_index || a.start_offset - b.start_offset)
+}
+
+function renderCounts(): void {
+  const all = getHighlightRows()
+  const set = (id: string, v: number): void => {
+    const el = document.querySelector<HTMLElement>(`#${id}`)
+    if (el) el.textContent = String(v)
+  }
+  set('cnt-all', all.length)
+  set('cnt-note', all.filter((r) => r.note.trim().length > 0).length)
+  set('cnt-hl', all.filter((r) => r.note.trim().length === 0).length)
+  const badge = document.querySelector<HTMLElement>('#notes-count')
+  if (badge) badge.textContent = String(all.length)
+}
+
 export function renderNotesPanel(): void {
   const list = $('#notes-list')
-  const count = $('#notes-count')
-  const rows = getHighlightRows()
-  if (count) count.textContent = String(rows.length)
+  renderCounts()
   if (!list) return
+  const rows = filtered()
   if (rows.length === 0) {
-    list.innerHTML = '<div class="notes-empty">还没有高亮或笔记<br/><span>选中正文文字即可添加</span></div>'
+    const tip =
+      tab === 'note' ? '还没有带笔记的批注' : tab === 'hl' ? '还没有纯高亮' : '还没有高亮或笔记'
+    list.innerHTML = `<div class="notes-empty">${tip}<br/><span>选中正文文字即可添加；点「✎」可编辑批注</span></div>`
     return
   }
-  const sorted = [...rows].sort((a, b) => a.block_index - b.block_index || a.start_offset - b.start_offset)
-  list.innerHTML = sorted
+  list.innerHTML = rows
     .map((r) => {
       const page = pageOfBlock(r.block_index)
       const quote = r.text.length > 120 ? `${r.text.slice(0, 120)}…` : r.text
-      const note = r.note?.trim()
+      const note = r.note.trim()
       return `<article class="note-item" data-hid="${r.id}">
         <div class="note-head">
           <span class="note-dot c-${esc(r.color)}"></span>
           <span class="note-page">${page ? `P${page}` : ''}</span>
+          <button class="note-edit" data-edit="${r.id}" title="编辑这条批注">✎</button>
           <button class="note-del" data-del="${r.id}" title="删除这条批注">✕</button>
         </div>
         <blockquote class="note-quote">${esc(quote)}</blockquote>
@@ -65,6 +95,35 @@ function flashMark(hid: number): void {
   void mark.offsetWidth
   mark.classList.add('hl-flash')
   window.setTimeout(() => mark.classList.remove('hl-flash'), 1500)
+}
+
+/** 正文 → 侧栏：滚动到对应条目并短暂高亮卡片 */
+function focusItem(hid: number): void {
+  const panel = $('#notes-panel')
+  if (!panel || panel.hidden) return
+  let item = panel.querySelector<HTMLElement>(`.note-item[data-hid="${hid}"]`)
+  if (!item) {
+    // 当前筛选下看不到该条 → 切回「全部 + 全部颜色」再定位
+    tab = 'all'
+    colorFilter = 'all'
+    syncControls()
+    renderNotesPanel()
+    item = panel.querySelector<HTMLElement>(`.note-item[data-hid="${hid}"]`)
+  }
+  if (!item) return
+  item.scrollIntoView({ block: 'nearest' })
+  panel.querySelectorAll('.note-item.active').forEach((x) => x.classList.remove('active'))
+  item.classList.add('active')
+  window.setTimeout(() => item?.classList.remove('active'), 1600)
+}
+
+function syncControls(): void {
+  document.querySelectorAll<HTMLButtonElement>('.notes-tabs button').forEach((b) => {
+    b.classList.toggle('on', b.dataset['tab'] === tab)
+  })
+  document.querySelectorAll<HTMLButtonElement>('.notes-colors button').forEach((b) => {
+    b.classList.toggle('on', b.dataset['color'] === colorFilter)
+  })
 }
 
 export function initNotesPanel(): void {
@@ -85,15 +144,33 @@ export function initNotesPanel(): void {
     $('#reader').classList.remove('notes-open')
   })
 
+  document.querySelectorAll<HTMLButtonElement>('.notes-tabs button').forEach((b) => {
+    b.addEventListener('click', () => {
+      tab = (b.dataset['tab'] as Tab) ?? 'all'
+      syncControls()
+      renderNotesPanel()
+    })
+  })
+  document.querySelectorAll<HTMLButtonElement>('.notes-colors button').forEach((b) => {
+    b.addEventListener('click', () => {
+      colorFilter = (b.dataset['color'] as ColorFilter) ?? 'all'
+      syncControls()
+      renderNotesPanel()
+    })
+  })
+
   $('#notes-list')?.addEventListener('click', (e) => {
     const t = e.target as HTMLElement
     const del = t.closest<HTMLElement>('[data-del]')
     if (del) {
       e.stopPropagation()
-      const id = Number(del.dataset['del'])
-      void window.paperlite.removeHighlight(id).then(() => {
-        // highlights.refresh 会触发 onHighlightsChanged → 自动重绘
-      })
+      void window.paperlite.removeHighlight(Number(del.dataset['del']))
+      return
+    }
+    const edit = t.closest<HTMLElement>('[data-edit]')
+    if (edit) {
+      e.stopPropagation()
+      editHighlightById(Number(edit.dataset['edit']))
       return
     }
     const item = t.closest<HTMLElement>('.note-item')
@@ -102,17 +179,15 @@ export function initNotesPanel(): void {
 
   onHighlightsChanged(() => {
     if (panel && !panel.hidden) renderNotesPanel()
-    else {
-      const count = $('#notes-count')
-      if (count) count.textContent = String(getHighlightRows().length)
-    }
+    else renderCounts()
   })
 
-  // 打开文献时先刷新一次计数
-  onHighlightsChanged(renderCountOnly)
-}
+  // 正文点高亮 → 侧栏联动定位
+  document.addEventListener('pl:hl-focus', (e) => {
+    const id = Number((e as CustomEvent<{ id: number }>).detail?.id)
+    if (Number.isFinite(id)) focusItem(id)
+  })
 
-function renderCountOnly(): void {
-  const count = $('#notes-count')
-  if (count) count.textContent = String(getHighlightRows().length)
+  syncControls()
+  renderCounts()
 }

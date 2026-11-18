@@ -6,7 +6,15 @@
  */
 
 export type Theme = 'dark' | 'light' | 'sepia'
-export type FontKey = 'serif' | 'cambria' | 'sans' | 'song'
+export type FontKey =
+  | 'ebgaramond'
+  | 'libertine'
+  | 'lato'
+  | 'opensans'
+  | 'serif'
+  | 'cambria'
+  | 'sans'
+  | 'song'
 export type TransStyle = 'underline' | 'block'
 
 export interface ReadSettings {
@@ -24,14 +32,20 @@ const KEY = 'pl.read.settings.v1'
 
 const DEFAULTS: ReadSettings = {
   theme: 'dark',
-  font: 'serif',
+  font: 'ebgaramond',
   size: 17,
   lh: 1.75,
   trans: 'block'
 }
 
-/** 字体栈：与 Scholaread 的 --font-* 家族对应（本地可用字体，不联网） */
+/** 字体栈：前四项为随包开源字体（EB Garamond / Linux Libertine / Lato /
+ *  Open Sans），后四项为系统字体。拉丁字形由随包字体渲染，中文回退到
+ *  宋体/思源宋体等系统字体。 */
 const FONTS: Record<FontKey, string> = {
+  ebgaramond: "'EB Garamond', Georgia, 'Songti SC', SimSun, serif",
+  libertine: "'Linux Libertine', 'EB Garamond', Georgia, 'Songti SC', SimSun, serif",
+  lato: "Lato, 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif",
+  opensans: "'Open Sans', 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif",
   serif: "Georgia, 'Times New Roman', 'Songti SC', SimSun, serif",
   cambria: "Cambria, 'Sitka Text', 'Palatino Linotype', Georgia, serif",
   sans: "'Segoe UI', system-ui, -apple-system, 'Microsoft YaHei', sans-serif",
@@ -94,8 +108,9 @@ export function syncPanel(): void {
     })
   }
   seg('rs-theme', state.theme)
-  seg('rs-font', state.font)
   seg('rs-trans', state.trans)
+  const fontSel = document.querySelector<HTMLSelectElement>('#rs-font')
+  if (fontSel) fontSel.value = state.font
   const size = document.querySelector<HTMLInputElement>('#rs-size')
   const sizeVal = document.querySelector<HTMLElement>('#rs-size-val')
   if (size) size.value = String(state.size)
@@ -131,8 +146,8 @@ export function initReadPrefs(): void {
   document.querySelectorAll<HTMLButtonElement>('#rs-theme button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ theme: b.dataset.v as Theme }))
   })
-  document.querySelectorAll<HTMLButtonElement>('#rs-font button').forEach((b) => {
-    b.addEventListener('click', () => updateSettings({ font: b.dataset.v as FontKey }))
+  document.querySelector('#rs-font')?.addEventListener('change', (e) => {
+    updateSettings({ font: (e.target as HTMLSelectElement).value as FontKey })
   })
   document.querySelectorAll<HTMLButtonElement>('#rs-trans button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ trans: b.dataset.v as TransStyle }))

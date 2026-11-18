@@ -72,12 +72,16 @@
           </div>
           <div class="rs-row">
             <span class="rs-label">字体</span>
-            <div class="rs-seg" id="rs-font">
-              <button data-v="serif">衬线</button>
-              <button data-v="cambria">Cambria</button>
-              <button data-v="sans">无衬线</button>
-              <button data-v="song">宋体</button>
-            </div>
+            <select id="rs-font" class="rs-select">
+              <option value="ebgaramond">EB Garamond（衬线）</option>
+              <option value="libertine">Linux Libertine（衬线）</option>
+              <option value="lato">Lato（无衬线）</option>
+              <option value="opensans">Open Sans（无衬线）</option>
+              <option value="serif">Georgia（系统）</option>
+              <option value="cambria">Cambria（系统）</option>
+              <option value="sans">系统无衬线</option>
+              <option value="song">宋体</option>
+            </select>
           </div>
           <div class="rs-row">
             <span class="rs-label">字号</span>
@@ -108,6 +112,17 @@
           <div class="notes-head">
             <span>笔记与高亮</span>
             <button id="notes-close" title="收起侧栏">✕</button>
+          </div>
+          <div class="notes-tabs">
+            <button data-tab="all" class="on">全部 <i id="cnt-all">0</i></button>
+            <button data-tab="note">批注 <i id="cnt-note">0</i></button>
+            <button data-tab="hl">高亮 <i id="cnt-hl">0</i></button>
+          </div>
+          <div class="notes-colors">
+            <button data-color="all" class="on" title="全部颜色">全部</button>
+            <button data-color="yellow" title="黄色"><span class="note-dot c-yellow"></span></button>
+            <button data-color="green" title="绿色"><span class="note-dot c-green"></span></button>
+            <button data-color="blue" title="蓝色"><span class="note-dot c-blue"></span></button>
           </div>
           <div id="notes-list"></div>
         </aside>
