@@ -33,6 +33,10 @@ export interface ReadSettings {
   lang: TargetLang
   /** 段落排版风格 */
   para: ParaStyle
+  /** 字体跟随原文类型（serif/sans/mono） */
+  followFont: boolean
+  /** 显示跨页/跨栏段落标记 */
+  crossMarks: boolean
 }
 
 const KEY = 'pl.read.settings.v1'
@@ -44,7 +48,9 @@ const DEFAULTS: ReadSettings = {
   lh: 1.75,
   trans: 'block',
   lang: 'zh-CN',
-  para: 'academic'
+  para: 'academic',
+  followFont: true,
+  crossMarks: false
 }
 
 /** 字体栈：前四项为随包开源字体（EB Garamond / Linux Libertine / Lato /
@@ -82,7 +88,9 @@ function read(): ReadSettings {
         p.lang === 'zh-TW' || p.lang === 'en' || p.lang === 'ja' || p.lang === 'ko'
           ? p.lang
           : 'zh-CN',
-      para: p.para === 'cjk' ? 'cjk' : 'academic'
+      para: p.para === 'cjk' ? 'cjk' : 'academic',
+      followFont: p.followFont !== false,
+      crossMarks: p.crossMarks === true
     }
   } catch {
     return { ...DEFAULTS }
@@ -100,6 +108,8 @@ export function applySettings(): void {
     article.style.setProperty('--font-article', FONTS[state.font])
     article.dataset.transStyle = state.trans
     article.dataset.para = state.para
+    article.dataset.followFont = state.followFont ? 'on' : 'off'
+    article.dataset.crossMarks = state.crossMarks ? 'on' : 'off'
   }
 }
 
@@ -129,6 +139,8 @@ export function syncPanel(): void {
   const langSel = document.querySelector<HTMLSelectElement>('#rs-lang')
   if (langSel) langSel.value = state.lang
   seg('rs-para', state.para)
+  seg('rs-follow', state.followFont ? 'on' : 'off')
+  seg('rs-cross', state.crossMarks ? 'on' : 'off')
   const size = document.querySelector<HTMLInputElement>('#rs-size')
   const sizeVal = document.querySelector<HTMLElement>('#rs-size-val')
   if (size) size.value = String(state.size)
@@ -173,6 +185,12 @@ export function initReadPrefs(): void {
   document.querySelectorAll<HTMLButtonElement>('#rs-para button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ para: b.dataset.v as ParaStyle }))
   })
+  document.querySelectorAll<HTMLButtonElement>('#rs-follow button').forEach((b) => {
+    b.addEventListener('click', () => updateSettings({ followFont: b.dataset.v === 'on' }))
+  })
+  document.querySelectorAll<HTMLButtonElement>('#rs-cross button').forEach((b) => {
+    b.addEventListener('click', () => updateSettings({ crossMarks: b.dataset.v === 'on' }))
+  })
   document.querySelectorAll<HTMLButtonElement>('#rs-trans button').forEach((b) => {
     b.addEventListener('click', () => updateSettings({ trans: b.dataset.v as TransStyle }))
   })
@@ -204,12 +222,15 @@ function initLightbox(): void {
   }
 
   document.querySelector('#reflow-article')?.addEventListener('click', (e) => {
-    const el = (e.target as HTMLElement).closest('img')
-    if (!el) return
-    const host = el.closest('.formula, figure')
-    if (!host) return
-    const src = (el as HTMLImageElement).src
-    if (src) open(src, (el as HTMLImageElement).alt || '')
+    const t = e.target as HTMLElement
+    // 选区非空时不触发（用户在选文字）
+    const sel = window.getSelection()
+    if (sel && !sel.isCollapsed) return
+    const host = t.closest('.formula, figure')
+    const el = (t.closest('img') as HTMLImageElement | null) ?? host?.querySelector('img') ?? null
+    if (!el || !host) return
+    const src = el.src
+    if (src) open(src, el.alt || '')
   })
   img.addEventListener('click', (e) => {
     e.stopPropagation()

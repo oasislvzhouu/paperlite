@@ -133,5 +133,6 @@ Montserrat / JetBrains Mono / Noto Sans Mono / Arial + 中文书法字体。
 | 段落风格 | 无缩进 + 左对齐 + 段距 | ✅ 新增「学术/中文」预设，默认学术 |
 | 行高 | 1.4 正文 / 1.3 caption | 可调 1.3–2.2（默认 1.75→可按需 1.5） |
 | 字体 | 原文子集字体内嵌 | 随包 EB Garamond/Libertine/Lato/Open Sans（非原文） |
-| 原子块 | 背景切图 + 可选中文字 | 截图像素（文字不可选） |
-| 跨栏段落 | 引擎 `-cross` 标注 | 几何启发式（列锚评分） |
+| 原子块 | 背景切图 + 可选中文字 | ✅ 裁图 + **透明文字覆盖层**（百分比定位 + cqw 字号，选中/复制可用，视觉不变） |
+| 跨栏段落 | 引擎 `-cross` 标注 | ✅ 块级 `cross` 元数据 + `data-cross` + 可选「⤓ 跨页 / ⇥ 跨栏」标记 |
+| 字体类型 | 原文子集字体 | ✅ 按原文族名匹配随包字体（Formata→Lato、Times→EB Garamond、Code→Source Code Pro），可在设置中关闭「字体跟随」 |

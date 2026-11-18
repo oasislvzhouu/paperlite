@@ -29,6 +29,12 @@ export interface ReflowBlock {
   eqZone?: { x0: number; x1: number; y0: number; y1: number }
   /** 几何聚类产出的公式块：矩形已最终化，禁止后续块级合并再动它 */
   geo?: boolean
+  /** 原子块（表格/算法）内可选中文字：坐标相对 rect 左上角（pt） */
+  textLines?: Array<{ x: number; y: number; fs: number; text: string }>
+  /** 跨栏/跨页段落标注（对标 Scholaread 的 -cross 类） */
+  cross?: 'col' | 'page'
+  /** 原文字体类别（块内多数行的字体族） */
+  fontKind?: 'serif' | 'sans' | 'mono'
   /** 块首行距页顶位置（pt），供图片异步插入时对位 */
   top?: number
   /** 首行字号（脚注检测用） */
@@ -103,6 +109,8 @@ export interface Line {
   text: string
   /** 富文本内联 HTML（保留原文的粗体/斜体/上下标，来自 MuPDF asHTML） */
   rich?: string
+  /** 原文字体类别（serif/sans/mono），用于按原文类型匹配随包字体 */
+  fontKind?: 'serif' | 'sans' | 'mono'
   /** 数学字体字符的宽度占比 */
   mathRatio: number
   /** 数学 Unicode 字符数占非空白字符比 */
@@ -123,6 +131,8 @@ export interface Line {
   tableZone?: { x0: number; x1: number; y0: number; y1: number }
   /** tableZone 实为算法框（"Algorithm N" + 伪代码体）→ 块 role=algorithm */
   tableAlgo?: boolean
+  /** tableZone 内的文本行（相对 rect 左上角，供可选中文字覆盖层） */
+  zoneText?: Array<{ x: number; y: number; fs: number; text: string }>
   /** 参考文献标题行（居中排版偏离栏锚会被排到栏尾）→ 强制起新块 */
   isRefStart?: boolean
   /** 编号锚定的公式行（display 公式的碎片主体/编号行） */
@@ -655,6 +665,23 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         block.top = bufLines[0].yTop
         block.firstFontSize = bufLines[0].fontSize
       }
+      // 块级字体类别：多数行的字体族（用于按原文类型匹配随包字体）
+      if (bufLines.length > 0) {
+        const tally: Record<string, number> = {}
+        for (const l of bufLines) if (l.fontKind) tally[l.fontKind] = (tally[l.fontKind] ?? 0) + 1
+        const top = Object.entries(tally).sort((a, b) => b[1] - a[1])[0]
+        if (top) block.fontKind = top[0] as 'serif' | 'sans' | 'mono'
+      }
+      // 跨栏 / 跨页段落标注（对标 Scholaread 引擎的 -cross 类）
+      if (block.kind === 'paragraph' && bufLines.length >= 3) {
+        const pages = new Set(bufLines.map((l) => l.page))
+        if (pages.size > 1) block.cross = 'page'
+        else {
+          const minX = Math.min(...bufLines.map((l) => l.x0))
+          const maxX = Math.max(...bufLines.map((l) => l.x0))
+          if (maxX - minX > bodySize * 6) block.cross = 'col'
+        }
+      }
       // 标题保留 PDF 原始字号比例（对标 Scholaread 的 adjustable_fsN：
       // 各级标题大小来自原文而非固定 em 阶梯）
       if (block.kind === 'heading' && block.firstFontSize && bodySize > 0) {
@@ -810,6 +837,7 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         page: l.page,
         text: l.text.replace(/\s+/g, ' ').trim(),
         rect: l.tableZone,
+        textLines: l.zoneText,
         top: l.yTop
       })
       continue
@@ -1613,6 +1641,16 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
           if (/[\u2200-\u22FF\u2190-\u21FF\u2A00-\u2AFF\u{1D400}-\u{1D7FF}\u0370-\u03FF]/u.test(ch)) mathChars++
         }
         const chars = text.replace(/\s/g, '')
+        // 字体类别：MuPDF 的 family 字段常一律返回 serif，需结合字体名判断
+        // （如 Formata/Arial = 无衬线，Times/Georgia = 衬线，Courier/Code = 等宽）
+        const fmeta = (l.font ?? {}) as { family?: string; name?: string }
+        const fam = `${fmeta.family ?? ''} ${fmeta.name ?? ''}`.toLowerCase()
+        const fontKind: 'serif' | 'sans' | 'mono' =
+          /mono|courier|consol|code|cica|typewriter/.test(fam)
+            ? 'mono'
+            : /sans|formata|arial|helvet|calibri|verdana|gothic|grotesk|roboto|lato|inter|poppins/.test(fam)
+              ? 'sans'
+              : 'serif'
         // 匹配同基线、同左边界、同前缀的富文本行
         const rich =
           richLines.find(
@@ -1629,6 +1667,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
           fontSize: bb.h,
           text,
           rich,
+          fontKind,
           html: text.replace(/[&<>"]/g, (c: string) => (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c])),
           mathRatio: 0,
           charMathRatio: chars.length ? mathChars / chars.length : 0,
@@ -2047,6 +2086,31 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
 
 const TABLE_CAPTION_RE = /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
 
+/** 收集矩形内的文本行（坐标转为相对 rect 左上角的 pt），
+ *  供原子块的可选中文字覆盖层使用（对标 Scholaread 的定位文字） */
+function collectZoneText(
+  lines: Line[],
+  page: number,
+  rect: { x0: number; x1: number; y0: number; y1: number }
+): Array<{ x: number; y: number; fs: number; text: string }> {
+  const out: Array<{ x: number; y: number; fs: number; text: string }> = []
+  for (const l of lines) {
+    if (l.page !== page) continue
+    const cx = (l.x0 + l.x1) / 2
+    const cy = l.yTop + Math.max(l.fontSize, 6) / 2
+    if (cx < rect.x0 - 1 || cx > rect.x1 + 1 || cy < rect.y0 - 1 || cy > rect.y1 + 1) continue
+    const text = l.text.trim()
+    if (!text) continue
+    out.push({
+      x: Math.round((l.x0 - rect.x0) * 10) / 10,
+      y: Math.round((l.yTop - rect.y0) * 10) / 10,
+      fs: Math.round(Math.max(4, l.fontSize) * 10) / 10,
+      text
+    })
+  }
+  return out.sort((a, b) => a.y - b.y || a.x - b.x)
+}
+
 export function detectTableZones(lines: Line[], bodySize: number): void {
   const isTableRow = (l: Line): boolean => {
     const t = l.text.replace(/\s/g, '')
@@ -2155,6 +2219,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       const y1 = boundary ? Math.min(boundary.yTop - 2, cap.yTop + 480, 752) : 752
       if (y1 - cap.yTop < bodySize * 3) continue // 下方紧挨正文 → 不算表格
       cap.tableZone = { x0: band.x0, x1: band.x1, y0: cap.yTop - 2, y1 }
+      cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
       continue
     }
     const all = [cap, ...rows]
@@ -2168,6 +2233,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
         752
       )
     }
+    cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
     for (const r of rows) consumed.add(r)
   }
   if (consumed.size > 0) {
@@ -2308,6 +2374,7 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
         y1: Math.min(boundary.yTop - 2, cap.yTop + 480)
       }
       cap.tableAlgo = true
+      cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
       if (prevTbl && prevLine) consumed.add(prevLine)
       continue
     }
@@ -2324,6 +2391,7 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
       )
     }
     cap.tableAlgo = true
+    cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
     for (const r of rows) consumed.add(r)
     if (prevTbl && prevLine) consumed.add(prevLine)
   }

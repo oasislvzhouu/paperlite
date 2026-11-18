@@ -1350,3 +1350,74 @@ body.reflow-mode .zoomer { display: none; }
 #reflow-article h3 i {
   font-family: inherit;
 }
+
+/* ═══ 原子块可选中文字（Phase 4.3，对标 Scholaread 的定位文字层） ═══════
+ * 裁图提供像素外观，覆盖层用透明文字提供选中/复制能力；
+ * 文字按 rect 百分比定位、字号用 cqw 随容器宽度等比缩放。 */
+#reflow-article .atomic {
+  position: relative;
+  container-type: inline-size;
+  line-height: 0;
+}
+#reflow-article .atomic img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+#reflow-article .atomic-text {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+#reflow-article .atomic-text span {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  line-height: 1.05;
+  font-family: var(--font-article);
+  user-select: text;
+  cursor: text;
+  transform: translateY(-0.12em);
+}
+#reflow-article .atomic-text span::selection {
+  background: var(--accent-weak);
+  color: transparent;
+}
+/* 覆盖层拦截点击时，灯箱仍要能打开：点击目标向上找 .atomic/figure */
+#reflow-article .atomic-text { pointer-events: auto; }
+
+/* ═══ 字体跟随原文（Phase 4.3）：块级 serif/sans/mono 匹配 ═══════════ */
+#reflow-article[data-follow-font='on'] .ff-sans {
+  font-family: Lato, 'Segoe UI', system-ui, 'Microsoft YaHei', sans-serif;
+  letter-spacing: 0.1px;
+}
+#reflow-article[data-follow-font='on'] .ff-mono {
+  font-family: 'Source Code Pro', ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.92em;
+  letter-spacing: 0;
+}
+/* 跨栏/跨页段落标记（默认仅在开启标记时显示） */
+#reflow-article p.cross-page::after,
+#reflow-article p.cross-col::after {
+  content: '';
+}
+#reflow-article[data-cross-marks='on'] p.cross-page::after {
+  content: '⤓ 跨页';
+  margin-left: 0.5em;
+  padding: 0 0.35em;
+  font-size: 0.62em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  vertical-align: 0.15em;
+}
+#reflow-article[data-cross-marks='on'] p.cross-col::after {
+  content: '⇥ 跨栏';
+  margin-left: 0.5em;
+  padding: 0 0.35em;
+  font-size: 0.62em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  vertical-align: 0.15em;
+}

@@ -9,6 +9,7 @@ PaperLite 内置以下字体（供「阅读设置 → 字体」选择），均�
 | Linux Libertine | `LinuxLibertine-Regular.otf` / `LinuxLibertine-Italic.otf` | SIL Open Font License 1.1 / GPL（双许可） |
 | Lato | `Lato-Regular.ttf` / `Lato-Bold.ttf` / `Lato-Italic.ttf` | SIL Open Font License 1.1 |
 | Open Sans | `OpenSans-Variable.ttf` | Apache License 2.0 |
+| Source Code Pro | `SourceCodePro-Variable.ttf` | SIL Open Font License 1.1 |
 
 ## SIL OFL 1.1 要点
 
@@ -25,5 +26,6 @@ PaperLite 内置以下字体（供「阅读设置 → 字体」选择），均�
 - Linux Libertine: Copyright (c) 2003-2012, Philipp H. Poll.
 - Lato: Copyright (c) 2010-2014, Lukasz Dziedzic.
 - Open Sans: Copyright (c) 2020, Google LLC.
+- Source Code Pro: Copyright (c) 2010-2023, Adobe (Source Code Pro).
 
 以上版权信息依各字体附带的许可证要求保留。

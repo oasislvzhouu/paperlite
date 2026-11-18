@@ -429,18 +429,34 @@ function renderReflow(): void {
       parts.push(`<figure class="figure" data-bi="${bi}">${imgs}</figure>`)
     } else if (b.kind === 'table') {
       const algoCls = b.role === 'algorithm' ? ' algorithm' : ''
+      // 原子块：裁图 + 透明文字覆盖层（文字可选中/可复制）
+      const r = b.rect
+      const tl = b.textLines ?? []
+      let overlay = ''
+      if (r && tl.length > 0) {
+        const W = Math.max(1, r.x1 - r.x0)
+        const H = Math.max(1, r.y1 - r.y0)
+        const spans = tl
+          .map(
+            (t) =>
+              `<span style="left:${((t.x / W) * 100).toFixed(2)}%;top:${((t.y / H) * 100).toFixed(2)}%;font-size:${((t.fs / W) * 100).toFixed(3)}cqw">${escapeHtml(t.text)}</span>`
+          )
+          .join('')
+        overlay = `<div class="atomic-text" aria-hidden="true">${spans}</div>`
+      }
       parts.push(
-        `<figure class="figure table${algoCls}" data-bi="${bi}"><figcaption>${body}</figcaption></figure>`
+        `<figure class="figure table${algoCls}" data-bi="${bi}"><figcaption>${body}</figcaption><div class="atomic">${overlay}</div></figure>`
       )
     } else if (b.kind === 'heading') {
       const lvl = clamp(b.level ?? 3, 1, 4)
-      const roleCls = b.role ? ` ${b.role}` : ''
+      const roleCls = `${b.role ? ` ${b.role}` : ''}${b.fontKind ? ` ff-${b.fontKind}` : ''}${b.cross ? ` cross-${b.cross}` : ''}`
       // 标题字号用 PDF 原始比例（em），保留原文的层级视觉差
       const fs = b.fontScale ? ` style="font-size:${(b.fontScale * (lvl === 1 ? 1.35 : 1)).toFixed(2)}em"` : ''
       parts.push(`<h${lvl} class="${roleCls.trim()}" data-bi="${bi}"${fs}>${body}</h${lvl}>`)
     } else {
-      const roleCls = b.role ? ` ${b.role}` : ''
-      parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}">${body}</p>`)
+      const roleCls = `${b.role ? ` ${b.role}` : ''}${b.fontKind ? ` ff-${b.fontKind}` : ''}${b.cross ? ` cross-${b.cross}` : ''}`
+      const crossAttr = b.cross ? ` data-cross="${b.cross}"` : ''
+      parts.push(`<p class="${roleCls.trim()}" data-bi="${bi}"${crossAttr}>${body}</p>`)
     }
   })
   article.innerHTML = parts.join('\n')
@@ -631,6 +647,7 @@ async function attachTables(): Promise<void> {
     try {
       const target = document.querySelector(`figure.table[data-bi="${blocks.indexOf(b)}"]`)
       if (!target || target.querySelector('img')) continue
+      const host = target.querySelector<HTMLElement>('.atomic') ?? target
       const canvas = await getPageCanvasMupdf(b.page, 3)
       if (!canvas) continue
       const scale = 3
@@ -651,7 +668,7 @@ async function attachTables(): Promise<void> {
       const img = document.createElement('img')
       img.src = out.toDataURL('image/jpeg', 0.92)
       img.style.maxWidth = '100%'
-      target.appendChild(img)
+      host.insertBefore(img, host.firstChild)
     } catch {
       /* 单表失败跳过 */
     }
