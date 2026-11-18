@@ -401,15 +401,23 @@ function orderLocalColumns(lines: Line[]): Line[] {
   }
   type Region = { cut: number; y0: number; y1: number; left: Line[]; right: Line[] }
   const regions: Region[] = []
-  for (let i = 0; i < clusters.length - 1; i++) {
-    const A = clusters[i]
-    const B = clusters[i + 1]
-    const gap = B.lines[0].x0 - A.x1max
-    if (gap < 12 || gap > 120) continue
+  // 只把 ≥3 行的簇当作栏候选（中间常夹着 1 行的页码/公式编号簇）
+  const major = clusters.filter((c) => c.lines.length >= 3)
+  for (let i = 0; i < major.length - 1; i++) {
+    const A = major[i]
+    const B = major[i + 1]
+    // 左簇可能同时包含通栏标题（x1 很大），用"结束于右簇之前"的行的
+    // 最大 x1 来算栏间距（MDPI 左元数据 x1≈152、右正文 x0=166）
+    const bX0 = B.lines[0].x0
+    const leftEnds = A.lines.filter((l) => l.x1 <= bX0 + 2)
+    if (leftEnds.length < 3) continue
+    const leftMaxX1 = Math.max(...leftEnds.map((l) => l.x1))
+    const gap = bX0 - leftMaxX1
+    if (gap < 8 || gap > 120) continue
     const y0 = Math.max(A.minY, B.minY)
     const y1 = Math.min(A.maxY, B.maxY)
     if (y1 - y0 < 40) continue
-    const cut = (A.x1max + B.lines[0].x0) / 2
+    const cut = (leftMaxX1 + bX0) / 2
     const inY = (l: Line) => l.yTop >= y0 - 4 && l.yTop <= y1 + 4
     const left = lines.filter((l) => inY(l) && l.x1 <= cut + 2).sort(topDown)
     const right = lines.filter((l) => inY(l) && l.x0 >= cut - 2).sort(topDown)
@@ -1210,6 +1218,8 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     // 拉丁连字符换行：同一个单词，直接拼进缓冲区末元素（join 时才不会多出空格）
     const lastT = bufT[bufT.length - 1] ?? ''
     if (bufT.length > 0 && bufKind !== 'formula' && /[-\u2010]\s*$/.test(lastT)) {
+      if ((globalThis as { __plTr?: boolean }).__plTr && /trans-\s*$/.test(lastT))
+        console.log('[tr]', JSON.stringify(lastT.slice(-20)), 'lower', /^[a-z]/.test(l.text.trimStart()), 'next', JSON.stringify(l.text.slice(0,12)), 'kind', bufKind)
       // 小写续行 = 断词或复合词（effi- ciency → efficiency；frequency- domain
       // → frequency-domain）；大写缩写续行 = 复合词（PFCG- Transformer）
       const lower = /^[a-z]/.test(l.text.trimStart())
@@ -1252,7 +1262,7 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     // 页脚行（通讯邮箱/doi/版权/收稿日期）不能与上一段或下一页正文粘连：
     // 曾把下一页首段整段吞进 E-mail 块
     const FOOTER_LINE_RE =
-      /e-?mail\s*[:：]|^[\w.+-]+@[\w.-]+\.\w{2,}|https?:\/\/doi\.org|©|received \d{1,2}\s+\w+\s+\d{4}|available online|equal contribution|corresponding author|^citation\s*:|^[A-Z][A-Za-z ]+\s+\d{4},\s*\d+|www\.mdpi\.com|^electronics\s+\d{4}|ORCID/i
+      /e-?mail\s*[:：]|^[\w.+-]+@[\w.-]+\.\w{2,}|https?:\/\/doi\.org|©|received \d{1,2}\s+\w+\s+\d{4}|available online|equal contribution|corresponding author|^citation\s*:|^[A-Z][A-Za-z ]+\s+\d{4},\s*\d+|www\.mdpi\.com|^electronics\s+\d{4}|^doi\.org\/|ORCID/i
     const isFooterLine = (t: string): boolean => FOOTER_LINE_RE.test(t)
     // 会议论文首页：作者行/单位行/邮箱行/ABSTRACT 标签必须分段，
     // 否则整块拼成一段（ICLR 的 "…@antgroup.com ABSTRACT"）
@@ -1973,7 +1983,8 @@ function markFrontMatterJunk(blocks: ReflowBlock[]): void {
     if (b.role && b.role !== 'list-item') continue
     const t = b.text.trim()
     const junkHeader = /^(?:research(?: article)?|article|review(?: article)?|original article|case report|editorial)$/i.test(t) ||
-      /^(?:eksploatacja|volume\s+\d+|vol\.?\s*\d+|journal homepage|indexed by|article citation info|e?-?issn)(?![A-Za-z])/i.test(t)
+      /^(?:eksploatacja|volume\s+\d+|vol\.?\s*\d+|journal homepage|indexed by|article citation info|e?-?issn)(?![A-Za-z])/i.test(t) ||
+      /^(?:electronics\s+\d{4}|citation\s*:|www\.mdpi\.com|doi\.org\/|licensee\s+mdpi)/i.test(t)
     const rotated = (b.firstFontSize ?? 1) === 0 || (/volV/i.test(t) && t.length < 40)
     const tinyMeta = (b.firstFontSize ?? 99) <= 6 && t.length < 140
     const orcid = /ORCID/i.test(t)
@@ -2001,6 +2012,62 @@ function markFrontMatterJunk(blocks: ReflowBlock[]): void {
     let last = 0
     for (let i = 0; i < blocks.length; i++) if (blocks[i].page === 1) last = i + 1
     blocks.splice(last, 0, ...metas)
+  }
+}
+
+/** 被页脚/元信息隔断的同页段落：a 未以句末标点结束、b 小写开头，
+ *  meta 块夹在中间时也要合并（MDPI 引言被 Electronics 页脚切成两段）。 */
+function mergeParagraphsAroundMeta(blocks: ReflowBlock[]): void {
+  for (let i = 0; i < blocks.length - 1; i++) {
+    const a = blocks[i]
+    if (a.kind !== 'paragraph' || (a.role && a.role !== 'para-cont')) continue
+    let j = i + 1
+    while (j < blocks.length && blocks[j].page === a.page && blocks[j].role === 'meta') j++
+    const b = blocks[j]
+    if (!b || b.page !== a.page || b.kind !== 'paragraph' || b.role) continue
+    if (/[.!?;:]$/.test(a.text.trim())) continue
+    if (!/^[a-z(]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
+    const aT = a.text.trim()
+    const aH = (a.html ?? aT).replace(/\s+$/, '')
+    const bT = b.text.trim()
+    const bH = (b.html ?? bT).replace(/^\s+/, '')
+    if (/[-‐]$/.test(aT)) {
+      // 跨页/被页脚隔断的断词："trans-" + "forming" → transforming
+      a.text = `${aT.replace(/[-‐]$/, '')}${bT}`
+      a.html = `${aH.replace(/[-‐]((?:\s*<\/(?:b|i|u|em|strong|span)>)*)$/, '$1')}${bH}`
+    } else {
+      a.text = `${aT} ${bT}`.replace(/\s+/g, ' ').trim()
+      a.html = `${aH} ${bH}`
+    }
+    blocks.splice(j, 1)
+  }
+}
+
+/** 跨页段落续接：上一页最后正文段未以句末标点结束、下一页首段以小写/括号
+ *  开头时合并。页脚 meta 允许夹在中间（Eksp 正文曾被 ORCID 脚注隔断）。 */
+function mergePageBoundaryParagraphs(blocks: ReflowBlock[]): void {
+  for (let i = 0; i < blocks.length - 1; i++) {
+    const a = blocks[i]
+    if (a.kind !== 'paragraph' || (a.role && a.role !== 'para-cont')) continue
+    let j = i + 1
+    while (j < blocks.length && blocks[j].page === a.page && blocks[j].role === 'meta') j++
+    const b = blocks[j]
+    if (!b || b.page !== a.page + 1 || b.kind !== 'paragraph' || b.role) continue
+    if (/[.!?;:)"'”]$/.test(a.text.trim())) continue
+    if (!/^[a-z(]/.test(b.text.trim()) && !/^\d+(?:\.\d+)?\s/.test(b.text.trim())) continue
+    const aT = a.text.trim()
+    const aH = (a.html ?? aT).replace(/\s+$/, '')
+    const bT = b.text.trim()
+    const bH = (b.html ?? bT).replace(/^\s+/, '')
+    if (/[-‐]$/.test(aT)) {
+      // 跨页/被页脚隔断的断词："trans-" + "forming" → transforming
+      a.text = `${aT.replace(/[-‐]$/, '')}${bT}`
+      a.html = `${aH.replace(/[-‐]((?:\s*<\/(?:b|i|u|em|strong|span)>)*)$/, '$1')}${bH}`
+    } else {
+      a.text = `${aT} ${bT}`.replace(/\s+/g, ' ').trim()
+      a.html = `${aH} ${bH}`
+    }
+    blocks.splice(j, 1)
   }
 }
 
@@ -2647,6 +2714,8 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   mergeHeadingContinuation(blocks)
   splitHeadingBody(blocks)
   markReferences(blocks)
+  mergeParagraphsAroundMeta(blocks)
+  mergePageBoundaryParagraphs(blocks)
   // 丢弃落在表格/算法裁图矩形内的短段落：表注的多行标题（"EMUs."）会被
   // 单独留成段落，而裁图已把它包含进像素 → 页面出现重复文字
   dropTextInsideAtomicCrops(blocks)

@@ -119,3 +119,39 @@ and Domain Adaptation Ability on Raw Vibration Signals**（21 页，单栏，
 
 **仍存在**：MDPI 矢量插图双方都缺；MDPI2 的 `Electronics 2024…` 页脚行仍会并进引言首段一行（后续
 需在 block 级按 footer 前缀拆分）；Eksp 正文在 PDF 页边界处断段（连续重排的取舍）。
+
+---
+
+## 第五轮：按 Scholaread 产物结构修复剩余项
+
+深挖其转换产物（`server/N/` 下的 `region.json`、`index.html`、`index.css`、
+`paragraph.json`）：
+
+- **`region.json` 是版面区域清单**：每条有 `x/y/width/height/id/order/type`
+  （title/author/text/…）。MDPI Sensors 第 1 页只有 10 条 **text** 区域，
+  Fig.1 所在的 y≈330–430 区域完全缺失——说明**其转换器同样丢弃矢量插图**，
+  不是我们截图的资源路径问题（`server/1` 里仅 `bg1.png/jpg` 页面底图）。
+  这确认了"矢量图缺失"是双方共同限制；后续若要补，需要我们自己做矢量
+  绘图算子的栅格化。
+- **其段落是页内建模**：`paragraph.json` 按页组织，跨页句子用
+  `cross_page` 标记而不是合并段落。PaperLite 是连续重排，跨页段落应合并
+  ——但页脚/ORCID 元信息会卡在页边界，导致正文被截断。
+
+据此做的修复：
+
+1. **跨页段落续接**：上一页正文段未以 `.!?;:` 结尾、下一页首段小写/括号
+   开头 → 合并，允许页脚 meta 夹在中间（Eksp 第 1→2 页正文恢复连续）。
+2. **同页被 meta 隔断的段落**：MDPI 引言被 `Electronics 2024…` 页脚切成
+   两段 → 跨 meta 合并；`(FDD)` 结尾不再视为句末。
+3. **局部并排区域**：按 x0 聚簇（只用 ≥3 行的主簇，避免页码/编号单行簇
+   打断），以"结束于右簇之前"的行的最大 x1 计算栏距，左栏读完再读右栏。
+   修复 MDPI 左元数据（Received/Accepted/版权）与右正文按 y 交错的问题，
+   `trans- forming`、`advent of Industry / 4.0` 等跨行/跨栏断词也随之消失。
+4. **meta 识别扩展**：`Electronics YYYY`、`Citation:`、`doi.org/`、`www.mdpi.com`、
+   `Licensee MDPI`、`ORCID` 归入页脚/元信息，不再并入正文或作者块。
+5. **合并函数支持连字符**：跨页/跨 meta 合并时若前段以 `-` 结尾且后段
+   小写开头，去连字符直拼（`trans-`+`forming` → `transforming`）。
+
+复测：MDPI2 第 1 页标题/作者/单位/邮箱/Correspondence/Abstract/Keywords/
+Introduction 全部正确，引言连续；Eksp 第 1 页摘要/Highlights/关键词/正文
+顺序正确，第 2 页首段与第 1 页末段连续。
