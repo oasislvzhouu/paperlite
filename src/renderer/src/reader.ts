@@ -242,6 +242,7 @@ export async function openReader(id: number): Promise<void> {
     }
   }
   mupdfBlocks = blocks
+  vectorAttachRunning = false
   if (!blocks || blocks.length === 0) blocks = null
   $('#reflow-loading').hidden = true
 
@@ -264,6 +265,7 @@ export async function openReader(id: number): Promise<void> {
   applyMode()
   if (mode === 'reflow') {
     renderReflow()
+    void attachVectorFigures()
     applyWidth()
     goTo(pageNum)
     void loadHighlights(id).then(() => applyHighlights())
@@ -503,6 +505,7 @@ function removeTextBlocksInRegions(
     if (b.page !== pageNo || b.top === undefined) return
     if (b.kind === 'image' || b.kind === 'table') return
     if (b.role === 'caption') return
+    if (/^\s*(?:fig(?:ure)?\.?|table|algorithm)\s*\d+/i.test(b.text)) return
     const inside = regions.some(
       (r) =>
         b.top! >= r.y0 - 4 &&
@@ -512,6 +515,65 @@ function removeTextBlocksInRegions(
     )
     if (inside) article.querySelector(`[data-bi="${bi}"]`)?.remove()
   })
+}
+
+/** 在图注块之前插入图（同页图），不依赖 top 锚点——跨页合并后 top 顺序
+ *  可能失效，按 block 索引定位最稳。 */
+
+/** 从 MuPDF 页面画布裁矢量图区域（top-down 坐标）。绕开 pdf.js 算子列表：
+ *  矢量图页在 pdf.js getOperatorList 上可能长时间不返回，MuPDF 渲染稳定。 */
+async function cropMupdfRegion(
+  pageNo: number,
+  r: { x0: number; y0: number; x1: number; y1: number }
+): Promise<string | null> {
+  const scale = 2
+  const cv = await getPageCanvasMupdf(pageNo, scale)
+  if (!cv) return null
+  const sx = Math.max(0, r.x0 * scale)
+  const sy = Math.max(0, r.y0 * scale)
+  const sw = Math.min(cv.width - sx, (r.x1 - r.x0) * scale)
+  const sh = Math.min(cv.height - sy, (r.y1 - r.y0) * scale)
+  if (sw < 30 || sh < 20) return null
+  const out = document.createElement('canvas')
+  out.width = Math.floor(sw)
+  out.height = Math.floor(sh)
+  const cx = out.getContext('2d')
+  if (!cx) return null
+  cx.fillStyle = '#fff'
+  cx.fillRect(0, 0, out.width, out.height)
+  cx.drawImage(cv, sx, sy, sw, sh, 0, 0, out.width, out.height)
+  let ix0 = out.width
+  let iy0 = out.height
+  let ix1 = -1
+  let iy1 = -1
+  try {
+    const data = cx.getImageData(0, 0, out.width, out.height).data
+    for (let y = 0; y < out.height; y++) {
+      for (let x = 0; x < out.width; x++) {
+        const k = (y * out.width + x) * 4
+        if (data[k] < 245 || data[k + 1] < 245 || data[k + 2] < 245) {
+          if (x < ix0) ix0 = x
+          if (x > ix1) ix1 = x
+          if (y < iy0) iy0 = y
+          if (y > iy1) iy1 = y
+        }
+      }
+    }
+  } catch {
+    return null
+  }
+  if (ix1 < 0 || ix1 - ix0 < 20 || iy1 - iy0 < 20) return null
+  const tw = ix1 - ix0 + 3
+  const th = iy1 - iy0 + 3
+  const trimmed = document.createElement('canvas')
+  trimmed.width = tw
+  trimmed.height = th
+  const tcx = trimmed.getContext('2d')
+  if (!tcx) return null
+  tcx.fillStyle = '#fff'
+  tcx.fillRect(0, 0, tw, th)
+  tcx.drawImage(out, ix0, iy0, tw, th, 0, 0, tw, th)
+  return trimmed.toDataURL('image/png')
 }
 
 function insertFigure(pageNo: number, yTop: number, dataUrl: string, naturalRatio = 1): void {
@@ -529,9 +591,12 @@ function insertFigure(pageNo: number, yTop: number, dataUrl: string, naturalRati
   img.style.maxWidth = pct + '%'
   fig.appendChild(img)
   // 插到同页第一个 top >= 图片顶的块之前；没有则放页尾（下一页分隔符前）
+  // 按 y 序找锚点：blocks 数组因跨页合并可能不是 top 单调的，直接 find
+  // 会命中页尾块，把图插到错误位置（MDPI Fig.4 曾被插到页末）
   const anchor = blocks
     .map((b, bi) => ({ b, bi }))
-    .find((x) => x.b.page === pageNo && x.b.top !== undefined && x.b.top >= yTop)
+    .filter((x) => x.b.page === pageNo && x.b.top !== undefined && x.b.top >= yTop)
+    .sort((a, b) => (a.b.top ?? 0) - (b.b.top ?? 0))[0]
   const anchorEl = anchor ? article.querySelector(`[data-bi="${anchor.bi}"]`) : null
   if (anchorEl?.parentNode) {
     anchorEl.parentNode.insertBefore(fig, anchorEl)
@@ -648,6 +713,9 @@ async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
     if (!opList) continue
     const rules = pathRulesFromOps(opList, pdfjsLib.OPS as unknown as Record<string, number>, vp.height)
     for (const b of list) {
+      // 文本判据已经给出合理表体高度时不再用边框覆盖（MDPI p13 的表格
+      // 与图共框，边框校正会把图重新吞回裁图）；只在裁图只剩表注时校正。
+      if (b.rect!.y1 - b.rect!.y0 >= 60) continue
       const bandX0 = b.rect!.x0
       const bandX1 = b.rect!.x1
       const capTop = b.top ?? b.rect!.y0
@@ -798,10 +866,231 @@ function showRenderDownTip(): void {
   }, 4000)
 }
 
+let vectorAttachRunning = false
+
+/** pdf.js 渲染不可用时的矢量插图兜底：只用 MuPDF 页面画布，
+ *  按图注上方区域裁图（不依赖 getOperatorList / 页面 render）。 */
+function insertFigureAtCaption(
+  cap: ReflowBlock,
+  dataUrl: string,
+  naturalRatio = 1
+): boolean {
+  const article = $('#reflow-article')
+  const nodes = [...article.querySelectorAll<HTMLElement>('[data-bi]')]
+  const prefix = cap.text.trim().slice(0, 18)
+  let el = nodes.find((n) => n.textContent.trim().startsWith(prefix)) ?? null
+  if (!el && blocks) {
+    const after = blocks
+      .map((b, bi) => ({ b, bi }))
+      .filter((x) => x.b.page === cap.page && x.b.top !== undefined && x.b.top > (cap.top ?? 0))
+      .sort((a, b) => (a.b.top ?? 0) - (b.b.top ?? 0))[0]
+    if (after) el = article.querySelector<HTMLElement>(`[data-bi="${after.bi}"]`)
+  }
+  if (!el?.parentNode) return false
+  const fig = document.createElement('figure')
+  fig.className = 'figure'
+  const img = document.createElement('img')
+  img.src = dataUrl
+  img.style.maxWidth = Math.round(Math.min(100, Math.max(42, naturalRatio * 115))) + '%'
+  fig.appendChild(img)
+  el.parentNode.insertBefore(fig, el)
+  return true
+}
+
+function insertFigureAfterCaption(
+  cap: ReflowBlock,
+  dataUrl: string,
+  naturalRatio = 1
+): boolean {
+  const article = $('#reflow-article')
+  if (!blocks) return false
+  const after = blocks
+    .map((b, bi) => ({ b, bi }))
+    .filter(
+      (x) =>
+        x.b.page === cap.page &&
+        x.b.top !== undefined &&
+        x.b.top > (cap.top ?? 0) + 2 &&
+        x.b.kind !== 'image'
+    )
+    .sort((a, b) => (a.b.top ?? 0) - (b.b.top ?? 0))[0]
+  if (!after) return false
+  const el = article.querySelector<HTMLElement>(`[data-bi="${after.bi}"]`)
+  if (!el?.parentNode) return false
+  const fig = document.createElement('figure')
+  fig.className = 'figure'
+  const img = document.createElement('img')
+  img.src = dataUrl
+  img.style.maxWidth = Math.round(Math.min(100, Math.max(42, naturalRatio * 115))) + '%'
+  fig.appendChild(img)
+  el.parentNode.insertBefore(fig, el)
+  return true
+}
+
+function insertFigureBeforePageSep(pageNext: number, dataUrl: string, naturalRatio = 1): void {
+  const article = $('#reflow-article')
+  const sep = article.querySelector<HTMLElement>(`.page-sep[data-page="${pageNext}"]`)
+  if (!sep?.parentNode) return
+  const fig = document.createElement('figure')
+  fig.className = 'figure'
+  const img = document.createElement('img')
+  img.src = dataUrl
+  img.style.maxWidth = Math.round(Math.min(100, Math.max(42, naturalRatio * 115))) + '%'
+  fig.appendChild(img)
+  sep.parentNode.insertBefore(fig, sep)
+}
+
+async function attachVectorFigures(): Promise<void> {
+  if (vectorAttachRunning) return
+  if (!mupdfDocRef || !blocks || mode !== 'reflow') return
+  vectorAttachRunning = true
+  let inserted = 0
+  for (let p = 1; p <= (doc?.numPages ?? 0); p++) {
+    if (readingId === 0) break
+    try {
+      const mp = mupdfDocRef.loadPage(p - 1) as unknown as { getBounds: () => number[] }
+      const bounds = mp.getBounds()
+      const vpW = bounds[2] - bounds[0]
+      const pageBlocks = blocks.filter((b) => b.page === p && b.top !== undefined)
+      const regions: Array<{
+        x0: number
+        y0: number
+        x1: number
+        y1: number
+        capBi: number
+        cap: ReflowBlock
+      }> = []
+      for (const cap of pageBlocks) {
+        if (!/^\s*fig(?:ure)?\.?\s*\d+/i.test(cap.text) || cap.top === undefined) continue
+        const prev = pageBlocks
+          .filter((b) => b !== cap && b.top !== undefined && b.top < cap.top! - 2 && b.kind !== 'image')
+          .sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
+        if (!prev) continue
+        const bodyLike = pageBlocks.filter(
+          (b) =>
+            (b.kind === 'paragraph' || b.kind === 'heading') &&
+            b.top !== undefined &&
+            b.bottom !== undefined &&
+            b.right !== undefined &&
+            b.left !== undefined &&
+            b.top < cap.top! - 2 &&
+            b.text.trim().split(/\s+/).filter(Boolean).length >= 6 &&
+            b.right - b.left >= vpW * 0.5
+        )
+        const prevBody = bodyLike.sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
+        const tableAbove = pageBlocks
+          .filter(
+            (b) =>
+              b.kind === 'table' && b.rect && b.top !== undefined && b.top < cap.top! &&
+              cap.top! - b.rect.y1 < 420
+          )
+          .sort((a, b) => (b.rect?.y1 ?? 0) - (a.rect?.y1 ?? 0))[0]
+        let y0: number
+        if (prevBody || tableAbove) {
+          y0 = Math.max(0, Math.max(prevBody?.bottom ?? 0, tableAbove?.rect?.y1 ?? 0) + 2)
+        } else if (cap.top > 140) {
+          // 无正文块可依（跨页段落归属上一页）：按图注上方 200pt 估图区
+          y0 = Math.max(0, cap.top - 200)
+        } else {
+          continue
+        }
+        const y1 = cap.top - 4
+        if (y1 - y0 < 40) continue
+        const left = Math.min(prev.left ?? cap.left ?? 30, cap.left ?? 30)
+        const right = Math.max(prev.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
+        regions.push({ x0: left - 4, y0, x1: right + 4, y1, capBi: blocks.indexOf(cap), cap })
+      }
+      if (regions.length > 0) removeTextBlocksInRegions(p, regions)
+      for (const reg of regions) {
+        const url = await cropMupdfRegion(p, reg)
+        if (!url) continue
+        const ratio = vpW > 0 ? (reg.x1 - reg.x0) / vpW : 1
+        const cap = (reg as { cap?: ReflowBlock }).cap
+        if (!cap || !insertFigureAtCaption(cap, url, ratio)) insertFigure(p, reg.y0, url, ratio)
+        inserted++
+      }
+      // 图注在页顶、图在上一页底部的跨页浮动体
+      if (p > 1) {
+        const topCaps = (blocks ?? []).filter(
+          (b) =>
+            b.page === p &&
+            b.top !== undefined &&
+            b.top < 260 &&
+            b.kind === 'paragraph' &&
+            /^\s*fig(?:ure)?\.?\s*\d+/i.test(b.text)
+        )
+        if (topCaps.length > 0) {
+          // 图注在页顶时，图常在注下方（caption-above-figure 版式）
+          for (const cap of topCaps) {
+            const next = (blocks ?? [])
+              .filter(
+                (b) =>
+                  b.page === cap.page &&
+                  b.top !== undefined &&
+                  b.top > (cap.top ?? 0) + 6 &&
+                  b.kind !== 'image'
+              )
+              .sort((a, b) => (a.top ?? 0) - (b.top ?? 0))[0]
+            const y0 = (cap.bottom ?? (cap.top ?? 0) + 12) + 4
+            const y1 = Math.min(next ? (next.top ?? y0 + 300) - 4 : y0 + 320, 760)
+            if (y1 - y0 < 60) continue
+            const left = Math.max(20, (cap.left ?? 30) - 4)
+            const right = Math.min(vpW - 12, (cap.right ?? vpW - 30) + 4)
+            const url = await cropMupdfRegion(p, { x0: left, y0, x1: right, y1 })
+            if (!url) continue
+            if (insertFigureAfterCaption(cap, url, vpW > 0 ? (right - left) / vpW : 1)) {
+              inserted++
+              topCaps.splice(topCaps.indexOf(cap), 1)
+            }
+          }
+        }
+        if (topCaps.length > 0) {
+          const prevBlocks = (blocks ?? []).filter(
+            (b) => b.page === p - 1 && b.bottom !== undefined && b.kind !== 'image' && b.kind !== 'table'
+          )
+          const prevPage = mupdfDocRef.loadPage(p - 2) as unknown as { getBounds: () => number[] }
+          const pb = prevPage.getBounds()
+          const pH = pb[3] - pb[1]
+          const pW = pb[2] - pb[0]
+          const bodyBottom = Math.max(...prevBlocks.map((b) => b.bottom!), 0)
+          const y0 = bodyBottom + 2
+          const y1 = pH - 12
+          if (y1 - y0 >= 40) {
+            for (const cap of topCaps) {
+              const left = Math.max(20, (cap.left ?? 30) - 4)
+              const right = Math.min(pW - 12, (cap.right ?? pW - 30) + 4)
+              const url = await cropMupdfRegion(p - 1, { x0: left, y0, x1: right, y1 })
+              if (!url) continue
+              insertFigureBeforePageSep(p, url, pW > 0 ? (right - left) / pW : 1)
+              inserted++
+            }
+          }
+        }
+      }
+    } catch {
+      /* 单页失败跳过 */
+    }
+  }
+  const chip = document.querySelector('#trans-status') as HTMLElement | null
+  const text = document.querySelector('#trans-status-text') as HTMLElement | null
+  if (inserted > 0 && chip && text) {
+    text.textContent = `矢量图已补 ${inserted} 张`
+    chip.classList.remove('done')
+    chip.hidden = false
+    window.setTimeout(() => {
+      chip.classList.add('done')
+      window.setTimeout(() => (chip.hidden = true), 450)
+    }, 2500)
+  }
+  vectorAttachRunning = false
+}
+
 async function attachImages(): Promise<void> {
   if (!doc || mode !== 'reflow') return
   if (!(await probeRenderReady())) {
     showRenderDownTip()
+    // pdf.js 渲染不可用不等于图表不可用：矢量图走 MuPDF 画布兜底
+    void attachVectorFigures()
     return
   }
   let inserted = 0
@@ -876,7 +1165,7 @@ async function attachImages(): Promise<void> {
       if (regions.length > 0) removeTextBlocksInRegions(p, regions)
       // 单页 12s 护栏：某页 pdf.js 算子列表卡死时不能让整本后续页都不补图
       const imgs = await Promise.race([
-        cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS, regions),
+        cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS, []),
         new Promise<Array<{ yTop: number; x0: number; x1: number; image?: string }>>((resolve) =>
           setTimeout(() => resolve([]), 12000)
         )
@@ -976,10 +1265,11 @@ async function attachTables(): Promise<void> {
  * 等原子块直接呈现原始 PDF 字形，不做文本重建；MathJax 仅用于 AI 回答。
  * 我们采用同一策略：按公式块 rect 从 MuPDF 页面裁图插入，保真度 100%。 */
 
-const formulaPageCanvas = new Map<number, HTMLCanvasElement>()
+const formulaPageCanvas = new Map<string, HTMLCanvasElement>()
 
 async function getPageCanvasMupdf(pageNo: number, scale = 3): Promise<HTMLCanvasElement | null> {
-  const hit = formulaPageCanvas.get(pageNo)
+  const key = `${pageNo}@${scale}`
+  const hit = formulaPageCanvas.get(key)
   if (hit) return hit
   if (!mupdfDocRef) return null
   const m = await loadMupdf().catch(() => null)
@@ -996,7 +1286,7 @@ async function getPageCanvasMupdf(pageNo: number, scale = 3): Promise<HTMLCanvas
     const cx = cv.getContext('2d')
     if (!cx) return null
     cx.drawImage(bmp, 0, 0)
-    formulaPageCanvas.set(pageNo, cv)
+    formulaPageCanvas.set(key, cv)
     return cv
   } catch {
     return null

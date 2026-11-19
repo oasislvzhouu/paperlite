@@ -3602,6 +3602,11 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       // 表体文本保留在 zoneText 覆盖层，视觉裁图完整，不会只剩表注 26pt。
       const bandRows: Line[] = []
       let prev = cap
+      // 表体结束判据：表格行通常横跨大半栏宽；图表的刻度/图例标签很短。
+      // 连续 3 条窄行出现即认为进入图区，y1 取最后一条"宽行"的底部。
+      const bandW = band.x1 - band.x0
+      let lastWide: Line | null = null
+      let narrowRun = 0
       for (const l of below) {
         if (l.yTop - prev.yTop > bodySize * 2.4) break
         if (isRefEntry(l) || isFooterLike(l) || isSectionHeadingLine(l)) break
@@ -3610,8 +3615,12 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
         if (l.yTop - cap.yTop > 400) break
         bandRows.push(l)
         prev = l
+        if (l.x1 - l.x0 > bandW * 0.35) {
+          lastWide = l
+          narrowRun = 0
+        } else if (++narrowRun >= 3) break
       }
-      const last = bandRows[bandRows.length - 1]
+      const last = lastWide ?? bandRows[bandRows.length - 1]
       const y1 = Math.min(last ? last.yTop + Math.max(last.fontSize, 6) + 4 : cap.yTop + 340, 752)
       if (y1 - cap.yTop < bodySize * 2) continue // 下方紧挨正文 → 不算表格
       cap.tableZone = {
@@ -3638,6 +3647,34 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
     for (const r of rows) consumed.add(r)
   }
+  // 表格与下方图共处一区时（MDPI p13 Table3 + Figure9），把表格下界收到
+  // 最后一条"贴栏边"的表格行：图表刻度/图例从 x≈131 开始，不贴栏左缘。
+  for (const cap of lines) {
+    if (!cap.tableZone) continue
+    const z = cap.tableZone
+    if (z.y1 - z.y0 < 180) continue
+    const figCap = lines.find(
+      (l) =>
+        l.page === cap.page &&
+        l.yTop > z.y0 &&
+        l.yTop < z.y1 + 460 &&
+        /^\s*(?:fig(?:ure)?\.?)\s*\d+/i.test(l.text.trim())
+    )
+    if (!figCap) continue
+    const rows = lines.filter(
+      (l) =>
+        l.page === cap.page &&
+        l !== cap &&
+        l.yTop > cap.yTop + 2 &&
+        l.yTop < figCap.yTop - 2 &&
+        l.x1 > z.x0 &&
+        l.x0 < z.x1 &&
+        (l.x0 <= z.x0 + 40 || l.x1 >= z.x1 - 40)
+    )
+    const last = rows.sort((a, b) => b.yTop - a.yTop)[0]
+    if (last) z.y1 = Math.min(z.y1, last.yTop + Math.max(last.fontSize, 6) + 30)
+  }
+
   // 重叠表格区校正：同一页两个表注的 zone 互相覆盖时（双栏页按阅读序
   // 会把邻栏表格行收进同一 zone），上方的表格截到下方 zone 起点；
   // 完全包含的小 zone 直接清除，避免两张裁图内容重复。
