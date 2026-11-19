@@ -253,6 +253,14 @@ export async function openReader(id: number): Promise<void> {
     $('#reflow-article').innerHTML =
       '<p class="reflow-notice">此 PDF 没有可提取的文字层（可能是扫描件），已切换到原版模式。OCR 支持在路线图后续阶段。</p>'
   }
+  if (mode === 'reflow' && blocks) {
+    try {
+      await refineAtomicRects(blocks)
+      suppressBlocksInsideTables(blocks)
+    } catch {
+      /* 边框校正失败时沿用文本判据 rect */
+    }
+  }
   applyMode()
   if (mode === 'reflow') {
     renderReflow()
@@ -483,6 +491,29 @@ function renderReflow(): void {
 }
 
 /** 渐进图片挂载：文本渲染后逐页补图（单页 4s 护栏，失败不影响阅读） */
+/** 插图/图区内的文字块（坐标轴标签、图内注释）由裁图呈现，
+ *  从 DOM 移除对应段落，避免巨大的 "Accuracy"/"Time(ms/signal)" 重复渲染 */
+function removeTextBlocksInRegions(
+  pageNo: number,
+  regions: Array<{ x0: number; y0: number; x1: number; y1: number }>
+): void {
+  if (!blocks) return
+  const article = $('#reflow-article')
+  blocks.forEach((b, bi) => {
+    if (b.page !== pageNo || b.top === undefined) return
+    if (b.kind === 'image' || b.kind === 'table') return
+    if (b.role === 'caption') return
+    const inside = regions.some(
+      (r) =>
+        b.top! >= r.y0 - 4 &&
+        b.top! <= r.y1 + 4 &&
+        (b.left ?? r.x0) >= r.x0 - 10 &&
+        (b.left ?? r.x0) <= r.x1 + 10
+    )
+    if (inside) article.querySelector(`[data-bi="${bi}"]`)?.remove()
+  })
+}
+
 function insertFigure(pageNo: number, yTop: number, dataUrl: string, naturalRatio = 1): void {
   const article = $('#reflow-article')
   if (!blocks) return
@@ -508,6 +539,164 @@ function insertFigure(pageNo: number, yTop: number, dataUrl: string, naturalRati
     const nextSep = article.querySelector(`.page-sep[data-page="${pageNo + 1}"]`)
     if (nextSep) article.insertBefore(fig, nextSep)
     else article.appendChild(fig)
+  }
+}
+
+/** 从 pdf.js 算子流解析矢量边框：表格/算法框的水平线、垂直线。
+ *  用来校正 MuPDF 文本判据算出的裁图 rect（MDPI Table 3 曾把整张
+ *  Figure 9 吞进表格裁图）。坐标统一转成 top-down。 */
+function pathRulesFromOps(
+  opList: { fnArray: number[]; argsArray: unknown[] },
+  OPS: Record<string, number>,
+  pageH: number
+): { h: Array<{ x0: number; x1: number; y: number }>; v: Array<{ x: number; y0: number; y1: number }> } {
+  const h: Array<{ x0: number; x1: number; y: number }> = []
+  const v: Array<{ x: number; y0: number; y1: number }> = []
+  const addSeg = (x0: number, y0: number, x1: number, y1: number) => {
+    const dx = Math.abs(x1 - x0)
+    const dy = Math.abs(y1 - y0)
+    if (dy < 1.2 && dx > 60) {
+      h.push({ x0: Math.min(x0, x1), x1: Math.max(x0, x1), y: pageH - (y0 + y1) / 2 })
+    } else if (dx < 1.2 && dy > 25) {
+      v.push({ x: (x0 + x1) / 2, y0: pageH - Math.max(y0, y1), y1: pageH - Math.min(y0, y1) })
+    }
+  }
+  for (let i = 0; i < opList.fnArray.length; i++) {
+    if (opList.fnArray[i] !== OPS.constructPath) continue
+    const [ops, args] = opList.argsArray[i] as [number[], number[]]
+    let j = 0
+    let cx = 0
+    let cy = 0
+    for (const op of ops) {
+      if (op === OPS.rectangle) {
+        const [x, y, w, hh] = args.slice(j, j + 4)
+        j += 4
+        const x2 = x + w
+        const y2 = y + hh
+        addSeg(x, y, x2, y)
+        addSeg(x2, y, x2, y2)
+        addSeg(x2, y2, x, y2)
+        addSeg(x, y2, x, y)
+        cx = x
+        cy = y
+      } else if (op === OPS.moveTo || op === OPS.lineTo) {
+        const x = args[j++]
+        const y = args[j++]
+        if (op === OPS.lineTo) addSeg(cx, cy, x, y)
+        cx = x
+        cy = y
+      } else if (op === OPS.curveTo || op === OPS.curveTo2 || op === OPS.curveTo3) {
+        j += 6
+        cx = args[j - 2]
+        cy = args[j - 1]
+      }
+    }
+  }
+  return { h, v }
+}
+
+/** 表格/算法裁图 rect 内的文字块（表体单元格、图内标签）已由裁图+覆盖层
+ *  呈现，渲染前从块序列移除，避免表格文字在裁图下方重复出现。 */
+function suppressBlocksInsideTables(blocks: ReflowBlock[]): void {
+  const tables = blocks.filter((b) => b.kind === 'table' && b.rect)
+  if (tables.length === 0) return
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (b.kind === 'table') continue
+    if (b.role === 'caption' || b.role === 'ref-entry') continue
+    if (b.top === undefined) continue
+    const inside = tables.some(
+      (t) =>
+        t.page === b.page &&
+        t.rect &&
+        b.top! >= t.rect.y0 - 6 &&
+        b.top! <= t.rect.y1 + 6 &&
+        (b.left ?? t.rect.x0) >= t.rect.x0 - 12 &&
+        (b.left ?? t.rect.x0) <= t.rect.x1 + 12
+    )
+    if (inside) blocks.splice(i, 1)
+  }
+}
+
+/** 用矢量边框校正表格/算法块 rect：优先左右竖线对，其次水平线簇 */
+async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
+  if (!doc) return
+  const byPage = new Map<number, ReflowBlock[]>()
+  for (const b of blocks) {
+    if (b.kind !== 'table' || !b.rect) continue
+    const arr = byPage.get(b.page) ?? []
+    arr.push(b)
+    byPage.set(b.page, arr)
+  }
+  for (const [p, list] of byPage) {
+    let page
+    try {
+      page = await doc.getPage(p)
+    } catch {
+      continue
+    }
+    const vp = page.getViewport({ scale: 1 })
+    const opList = await page.getOperatorList().catch(() => null)
+    if (!opList) continue
+    const rules = pathRulesFromOps(opList, pdfjsLib.OPS as unknown as Record<string, number>, vp.height)
+    for (const b of list) {
+      const bandX0 = b.rect!.x0
+      const bandX1 = b.rect!.x1
+      const capTop = b.top ?? b.rect!.y0
+      // 竖线对：两条 x 不同、y 区间重叠、起始在表注下方 80pt 内
+      const vlines = rules.v.filter(
+        (r) => r.x >= bandX0 - 12 && r.x <= bandX1 + 12 && r.y1 > capTop - 4 && r.y0 < capTop + 420
+      )
+      let best: { x0: number; x1: number; y0: number; y1: number } | null = null
+      for (let i = 0; i < vlines.length; i++) {
+        for (let j = i + 1; j < vlines.length; j++) {
+          const a = vlines[i]
+          const c = vlines[j]
+          if (Math.abs(a.x - c.x) < 80) continue
+          const top = Math.max(a.y0, c.y0)
+          const bot = Math.min(a.y1, c.y1)
+          if (bot - top < 40) continue
+          if (top < capTop - 4 || top > capTop + 80) continue
+          if (!best || bot - top > best.y1 - best.y0) {
+            best = { x0: Math.min(a.x, c.x), x1: Math.max(a.x, c.x), y0: top, y1: bot }
+          }
+        }
+      }
+      if (!best) {
+        // 水平线簇（无竖边框时）
+        const hs = rules.h
+          .filter((r) => r.y > capTop - 4 && r.y < capTop + 420 && r.x1 > bandX0 - 10 && r.x0 < bandX1 + 10)
+          .sort((a, b) => a.y - b.y)
+        const clusters: Array<{ y0: number; y1: number; x0: number; x1: number; n: number }> = []
+        for (const r of hs) {
+          const last = clusters[clusters.length - 1]
+          if (
+            last &&
+            r.y - last.y1 <= 26 &&
+            Math.abs(r.x0 - last.x0) <= 20 &&
+            Math.abs(r.x1 - last.x1) <= 20
+          ) {
+            last.y1 = r.y
+            last.x0 = Math.min(last.x0, r.x0)
+            last.x1 = Math.max(last.x1, r.x1)
+            last.n++
+          } else clusters.push({ y0: r.y, y1: r.y, x0: r.x0, x1: r.x1, n: 1 })
+        }
+        const pick = clusters.filter((c) => c.n >= 2 && c.y0 - capTop < 60).sort((a, b) => b.n - a.n)[0]
+        if (pick) best = { x0: pick.x0, x1: pick.x1, y0: pick.y0, y1: pick.y1 }
+      }
+      if (!best) continue
+      b.rect = {
+        x0: Math.max(bandX0 - 8, best.x0 - 2),
+        x1: Math.min(bandX1 + 8, best.x1 + 2),
+        y0: best.y0 - 2,
+        y1: best.y1 + 2
+      }
+      ;(globalThis as { __plTableRects?: unknown[] }).__plTableRects = [
+        ...((globalThis as { __plTableRects?: unknown[] }).__plTableRects ?? []),
+        { page: p, text: b.text.slice(0, 24), rect: b.rect, rules: rules.v.length + '/' + rules.h.length }
+      ]
+    }
   }
 }
 
@@ -657,6 +846,7 @@ async function attachImages(): Promise<void> {
           .map((b) => ({ x0: b.left!, y0: b.top! - 1, x1: b.right!, y1: b.bottom! + 1 }))
         regions.push({ x0: left - 4, y0, x1: right + 4, y1, mask })
       }
+      if (regions.length > 0) removeTextBlocksInRegions(p, regions)
       // 单页 12s 护栏：某页 pdf.js 算子列表卡死时不能让整本后续页都不补图
       const imgs = await Promise.race([
         cropPageImages(page, vp.width, vp.height, pdfjsLib.OPS, regions),

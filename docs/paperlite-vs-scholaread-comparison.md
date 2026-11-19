@@ -232,3 +232,21 @@ Introduction 全部正确，引言连续；Eksp 第 1 页摘要/Highlights/关�
 - Algorithm 1：完整算法框（已扩右边，y1=520 仍可能截断后半）；
 - 重复 n-gram：ICLR 第 7/8 页 d52/d20、MDPI 第 10/17 页 d19/d17，需定位是
   表格覆盖层/图注重复还是跨页合并重复。
+
+### 第七轮补充：按 Scholaread 的 region 模型校正表格/算法框
+
+读其 `server/N/region.json` 发现它直接输出 `table / table_caption /
+figure / figure_caption` 区域（MDPI p13：table x96 y257 w401 h104，
+figure x131 y372 w332 h186；p8：figure y140–301、table y337–520）。
+我们据此实现了矢量化校正（不依赖其缓存）：
+
+- 解析 pdf.js `constructPath` 算子，提取水平/垂直边框线（top-down 坐标）；
+- 表格/算法块优先用左右竖线对（y 重叠、起点距表注 <80pt）定 rect；
+  无竖线时用水平线簇（限制 x 范围一致性，避免与下方图表合并）；
+- 校正后删除落在裁图 rect 内的文字块（表体单元格/图内标签），
+  避免表格文字在裁图下方重复；图区内的文字块（坐标轴标签）也从 DOM 移除。
+
+效果：MDPI p8 Algorithm 1 裁图 x 293→523、y 390→520（覆盖完整算法框）；
+p13 表格重复单元格消除。仍不完美：p13 的表格与 Figure 9 共用一个外框，
+竖线对给出 y262–479（表+图），需要按内部横线密度再切分；图 9 坐标轴
+数据标签在 p13 页尾仍残留。
