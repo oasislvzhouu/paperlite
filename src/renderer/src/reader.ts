@@ -965,7 +965,6 @@ async function attachVectorFigures(): Promise<void> {
         const prev = pageBlocks
           .filter((b) => b !== cap && b.top !== undefined && b.top < cap.top! - 2 && b.kind !== 'image')
           .sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
-        if (!prev) continue
         const bodyLike = pageBlocks.filter(
           (b) =>
             (b.kind === 'paragraph' || b.kind === 'heading') &&
@@ -988,6 +987,10 @@ async function attachVectorFigures(): Promise<void> {
         let y0: number
         if (prevBody || tableAbove) {
           y0 = Math.max(0, Math.max(prevBody?.bottom ?? 0, tableAbove?.rect?.y1 ?? 0) + 2)
+        } else if (cap.top <= 260) {
+          // 图注在页顶且上方无块（MDPI Fig.5）：图就在注上方 90-190pt，
+          // 从注上方 120pt 起裁，避开页眉
+          y0 = Math.max(70, cap.top - 120)
         } else if (cap.top > 140) {
           // 无正文块可依（跨页段落归属上一页）：按图注上方 200pt 估图区
           y0 = Math.max(0, cap.top - 200)
@@ -996,8 +999,8 @@ async function attachVectorFigures(): Promise<void> {
         }
         const y1 = cap.top - 4
         if (y1 - y0 < 40) continue
-        const left = Math.min(prev.left ?? cap.left ?? 30, cap.left ?? 30)
-        const right = Math.max(prev.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
+        const left = Math.min(prev?.left ?? cap.left ?? 30, cap.left ?? 30)
+        const right = Math.max(prev?.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
         regions.push({ x0: left - 4, y0, x1: right + 4, y1, capBi: blocks.indexOf(cap), cap })
       }
       if (regions.length > 0) removeTextBlocksInRegions(p, regions)
@@ -1146,8 +1149,8 @@ async function attachImages(): Promise<void> {
         const y0 = Math.max(0, Math.max(baseY, tableY) + 2, cap.top - 380)
         const y1 = cap.top - 4
         if (y1 - y0 < 40) continue
-        const left = Math.min(prev.left ?? cap.left ?? 30, cap.left ?? 30)
-        const right = Math.max(prev.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
+        const left = Math.min(prev?.left ?? cap.left ?? 30, cap.left ?? 30)
+        const right = Math.max(prev?.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
         const area = (right - left) * (y1 - y0)
         const covered = pageBlocks.some((b) => {
           if (b.kind !== 'table' || !b.rect) return false
@@ -1219,7 +1222,7 @@ function pruneFormulasInFigures(): void {
       }
     }
   })
-  if (removed > 0) console.log('[paperlite] 移除图内公式标签', removed)
+
 }
 
 /** 表格块渲染：MuPDF 整块矩形裁图（含转曲矢量表格）

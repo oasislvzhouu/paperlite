@@ -1713,7 +1713,6 @@ export async function cropPageImages(
     const rx1 = x0 + (ix1 + 1) / scale
     const ry0 = y0 + iy0 / scale
     const ry1 = y0 + (iy1 + 1) / scale
-    void ry1
     lines.push({
       page: 0,
       yTop: ry0,
@@ -3673,6 +3672,16 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     )
     const last = rows.sort((a, b) => b.yTop - a.yTop)[0]
     if (last) z.y1 = Math.min(z.y1, last.yTop + Math.max(last.fontSize, 6) + 30)
+  }
+
+  // 过短的表格 zone（caption-only）不生成空裁图：保留图注为普通段落，
+  // 表体文字按正文块渲染，避免 12-26pt 的空框
+  for (const l of lines) {
+    if (l.tableZone && l.tableZone.y1 - l.tableZone.y0 < 32) {
+      l.tableZone = undefined
+      l.tableAlgo = false
+      l.zoneText = undefined
+    }
   }
 
   // 重叠表格区校正：同一页两个表注的 zone 互相覆盖时（双栏页按阅读序

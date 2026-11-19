@@ -695,9 +695,7 @@ body.reflow-mode .zoomer { display: none; }
   border-radius: 8px;
   background: #fff;
 }
-/* 裁图从表注下方开始（rect.y0 > 图注底），图注必须保留；
- * 隐藏只用于旧数据里裁图已包含标题的情况（由 data-caption-inside 标记） */
-#reflow-article figure.table[data-caption-inside]:has(img) figcaption { display: none; }
+/* 裁图从表注下方开始（rect.y0 > 图注底），图注始终保留 */
 /* 算法框原子块（对标 no-reflow-code-i）：表题保持原文大小写（"Algorithm 1"），
  * 伪代码体裁图带浅底衬，视觉上区别于数据表 */
 #reflow-article figure.table.algorithm figcaption { text-transform: none; }
