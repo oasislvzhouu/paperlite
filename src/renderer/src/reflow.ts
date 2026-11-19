@@ -1114,6 +1114,12 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
       flush() // REFERENCES 标题强制起新块（防并入前段尾部）
       inRefZone = true
     }
+    // 数字编号参考文献（MDPI/Springer "7. Lee, W.; …"）：每条独立成块；
+    // 参考文献不跨页续接（跨页时强制 flush，否则整页条目并进上一页一段）
+    if (inRefZone && bufT.length > 0) {
+      if (l.page !== bufPage) flush()
+      else if (/^\d{1,3}\.\s+[A-Z]/.test(l.text.trim())) flush()
+    }
     // 引用条目标记行（"[8]" 单独成行）：新条目开始，强制分块——
     // 否则条目连成一片，编号错位插进上一条结尾
     if (bufT.length > 0 && /^\[\s*\d{1,3}\s*\]$/.test(l.text.trim())) flush()
@@ -2851,7 +2857,9 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   // 单独留成段落，而裁图已把它包含进像素 → 页面出现重复文字
   dropTextInsideAtomicCrops(blocks)
   // 丢弃空文本的公式块（版面装饰/分隔线被聚成空簇）
-  const nonEmpty = blocks.filter((b) => b.kind !== 'formula' || b.text.trim().length > 0)
+  const nonEmpty = blocks.filter(
+    (b) => b.kind !== 'formula' || b.text.replace(/[^A-Za-z0-9]/g, '').length >= 2
+  )
   blocks.length = 0
   blocks.push(...nonEmpty)
   // 丢弃落在插图内的公式块（图内标签，不是正文公式）
@@ -3513,8 +3521,26 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     }
   }
   for (const v of pageSpan.values()) v.mid = (v.minX + v.maxX) / 2
+  // 判断页面是否实际单栏：右栏（x0≥mid）的行少于 3 → 表注/算法标题即使
+  // 只占左半行，裁图也应取整页正文带宽度（MDPI 算法框曾只裁到 x=293）
+  const singleCol = new Set<number>()
+  for (const [pg, span] of pageSpan) {
+    let right = 0
+    for (const l of lines) {
+      if (l.page !== pg || l.yTop < 50 || l.yTop > 750) continue
+      // 只把宽正文行当右栏证据：图内标签/公式编号会误判页面为双栏
+      if (
+        l.x0 >= span.mid + 4 &&
+        l.x1 - l.x0 > (span.maxX - span.minX) * 0.3 &&
+        l.wordCount >= 6
+      )
+        right++
+    }
+    if (right < 3) singleCol.add(pg)
+  }
   const colOf = (l: Line): { x0: number; x1: number } => {
     const span = pageSpan.get(l.page) ?? { minX: 20, maxX: 592, mid: 306 }
+    if (singleCol.has(l.page)) return { x0: span.minX - 4, x1: span.maxX + 4 }
     if (l.x0 >= span.mid) return { x0: span.mid + 4, x1: span.maxX + 4 }
     if (l.x1 <= span.mid) return { x0: span.minX - 4, x1: span.mid - 4 }
     return { x0: span.minX - 4, x1: span.maxX + 4 }
@@ -3560,6 +3586,8 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       if (isRefEntry(l) || isFooterLike(l) || isProse(l) || isSectionHeadingLine(l)) break
       // 下一个表注（同页连续排版的 TABLE N / 表N）→ 当前表结束
       if (TABLE_CAPTION_RE.test(l.text.trim())) break
+      // 图注绝不可能是表格行（MDPI Table 3 后面紧跟 Figure 9，曾被吞进裁图）
+      if (/^\s*(?:fig(?:ure)?\.?)\s*\d+/i.test(l.text.trim())) break
       if (l.fontSize > bodySize * 1.5) break
       if (!isTableRow(l)) break
       if (l.yTop + Math.max(l.fontSize, 6) - cap.yTop > 340) break
@@ -3569,10 +3597,23 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     const boundary = below.find((l) => !rows.includes(l)) ?? null
 
     if (rows.length < 2) {
-      // 兜底：表格体为转曲矢量（无文本层）。右边界取几何上最近的同栏
-      // 文本行（原"到页底"会把整页裁成一张图）
-      const y1 = boundary ? Math.min(boundary.yTop - 2, cap.yTop + 480, 752) : 752
-      if (y1 - cap.yTop < bodySize * 3) continue // 下方紧挨正文 → 不算表格
+      // 表体未被 isTableRow 收下（多列短单元格/矢量表）：按"行间空隙"
+      // 收集紧接表注的连续行，直到出现 >2.4 行高的空隙或章节标题。
+      // 表体文本保留在 zoneText 覆盖层，视觉裁图完整，不会只剩表注 26pt。
+      const bandRows: Line[] = []
+      let prev = cap
+      for (const l of below) {
+        if (l.yTop - prev.yTop > bodySize * 2.4) break
+        if (isRefEntry(l) || isFooterLike(l) || isSectionHeadingLine(l)) break
+        // 下一张图注开始 → 表格结束（MDPI Table 3 后紧跟 Figure 9 图注）
+        if (/^\s*(?:fig(?:ure)?\.?)\s*\d+/i.test(l.text.trim())) break
+        if (l.yTop - cap.yTop > 400) break
+        bandRows.push(l)
+        prev = l
+      }
+      const last = bandRows[bandRows.length - 1]
+      const y1 = Math.min(last ? last.yTop + Math.max(last.fontSize, 6) + 4 : cap.yTop + 340, 752)
+      if (y1 - cap.yTop < bodySize * 2) continue // 下方紧挨正文 → 不算表格
       cap.tableZone = { x0: band.x0, x1: band.x1, y0: cap.yTop - 2, y1 }
       cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
       continue
@@ -3645,8 +3686,26 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     }
   }
   for (const v of pageSpan.values()) v.mid = (v.minX + v.maxX) / 2
+  // 判断页面是否实际单栏：右栏（x0≥mid）的行少于 3 → 表注/算法标题即使
+  // 只占左半行，裁图也应取整页正文带宽度（MDPI 算法框曾只裁到 x=293）
+  const singleCol = new Set<number>()
+  for (const [pg, span] of pageSpan) {
+    let right = 0
+    for (const l of lines) {
+      if (l.page !== pg || l.yTop < 50 || l.yTop > 750) continue
+      // 只把宽正文行当右栏证据：图内标签/公式编号会误判页面为双栏
+      if (
+        l.x0 >= span.mid + 4 &&
+        l.x1 - l.x0 > (span.maxX - span.minX) * 0.3 &&
+        l.wordCount >= 6
+      )
+        right++
+    }
+    if (right < 3) singleCol.add(pg)
+  }
   const colOf = (l: Line): { x0: number; x1: number } => {
     const span = pageSpan.get(l.page) ?? { minX: 20, maxX: 592, mid: 306 }
+    if (singleCol.has(l.page)) return { x0: span.minX - 4, x1: span.maxX + 4 }
     if (l.x0 >= span.mid) return { x0: span.mid + 4, x1: span.maxX + 4 }
     if (l.x1 <= span.mid) return { x0: span.minX - 4, x1: span.mid - 4 }
     return { x0: span.minX - 4, x1: span.maxX + 4 }
@@ -3719,14 +3778,24 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     )
 
     if (rows.length < 2) {
-      // 矢量兜底：伪代码体转曲（无文本层）时靠表题下方的文本空隙定位
-      const gap = boundary ? boundary.yTop - (cap.yTop + Math.max(cap.fontSize, 6)) : 0
-      if (!boundary || gap < bodySize * 4) continue
+      // 伪代码体未被 isAlgoBodyLine 收下（MDPI 的 Input:/For/End for 混排）：
+      // 同样按行间空隙收集连续行，裁完整算法框
+      const bandRows: Line[] = []
+      let prev = cap
+      for (const l of below) {
+        if (l.yTop - prev.yTop > bodySize * 3) break
+        if (isSectionHeadingLine(l)) break
+        if (l.yTop - cap.yTop > 360) break
+        bandRows.push(l)
+        prev = l
+      }
+      const last = bandRows[bandRows.length - 1]
+      if (!last) continue
       cap.tableZone = {
         x0: prevTbl && prevLine ? Math.min(band.x0, prevLine.x0) - 2 : band.x0,
         x1: band.x1,
         y0: (prevTbl && prevLine ? prevLine.yTop : cap.yTop) - 2,
-        y1: Math.min(boundary.yTop - 2, cap.yTop + 480)
+        y1: Math.min(last.yTop + Math.max(last.fontSize, 6) + 4, 752)
       }
       cap.tableAlgo = true
       cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
