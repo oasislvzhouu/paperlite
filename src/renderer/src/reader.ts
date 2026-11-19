@@ -686,16 +686,35 @@ async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
         if (pick) best = { x0: pick.x0, x1: pick.x1, y0: pick.y0, y1: pick.y1 }
       }
       if (!best) continue
+      // 表格与下方图共用一个外框时（MDPI p13：table 257-361 + figure 372-558
+      // 在同一竖线框内），按框内水平线的密度切分：取下半区第一条横线作为
+      // 分界，表格裁图不再吞掉整张图。
+      if (best.y1 - best.y0 > 180) {
+        const hasFigCap = blocks.some(
+          (x) =>
+            x.page === p &&
+            x.top !== undefined &&
+            x.top > best!.y0 &&
+            x.top < best!.y1 + 460 &&
+            /^\s*fig(?:ure)?\.?\s*\d+/i.test(x.text)
+        )
+        if (hasFigCap) {
+          const mid = (best.y0 + best.y1) / 2
+          const inner = rules.h
+            .filter((r) => r.y > mid && r.y < best!.y1 && r.x1 > best!.x0 && r.x0 < best!.x1)
+            .sort((a, c) => a.y - c.y)
+          const split = inner.find((r) => r.y > best!.y0 + 90)
+          if (split && split.y - best.y0 > 60) {
+            best.y1 = split.y - 2
+          }
+        }
+      }
       b.rect = {
         x0: Math.max(bandX0 - 8, best.x0 - 2),
         x1: Math.min(bandX1 + 8, best.x1 + 2),
         y0: best.y0 - 2,
         y1: best.y1 + 2
       }
-      ;(globalThis as { __plTableRects?: unknown[] }).__plTableRects = [
-        ...((globalThis as { __plTableRects?: unknown[] }).__plTableRects ?? []),
-        { page: p, text: b.text.slice(0, 24), rect: b.rect, rules: rules.v.length + '/' + rules.h.length }
-      ]
     }
   }
 }
