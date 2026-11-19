@@ -585,8 +585,13 @@ function pathRulesFromOps(
         if (op === OPS.lineTo) addSeg(cx, cy, x, y)
         cx = x
         cy = y
-      } else if (op === OPS.curveTo || op === OPS.curveTo2 || op === OPS.curveTo3) {
+      } else if (op === OPS.curveTo) {
         j += 6
+        cx = args[j - 2]
+        cy = args[j - 1]
+      } else if (op === OPS.curveTo2 || op === OPS.curveTo3) {
+        // pdf.js: curveTo2/3 只带 4 个坐标（终点+控制点）
+        j += 4
         cx = args[j - 2]
         cy = args[j - 1]
       }
@@ -603,7 +608,7 @@ function suppressBlocksInsideTables(blocks: ReflowBlock[]): void {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i]
     if (b.kind === 'table') continue
-    if (b.role === 'caption' || b.role === 'ref-entry') continue
+    if (b.role === 'caption') continue
     if (b.top === undefined) continue
     const inside = tables.some(
       (t) =>
@@ -636,7 +641,10 @@ async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
       continue
     }
     const vp = page.getViewport({ scale: 1 })
-    const opList = await page.getOperatorList().catch(() => null)
+    const opList = await Promise.race([
+      page.getOperatorList().catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000))
+    ])
     if (!opList) continue
     const rules = pathRulesFromOps(opList, pdfjsLib.OPS as unknown as Record<string, number>, vp.height)
     for (const b of list) {
@@ -710,8 +718,8 @@ async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
         }
       }
       b.rect = {
-        x0: Math.max(bandX0 - 8, best.x0 - 2),
-        x1: Math.min(bandX1 + 8, best.x1 + 2),
+        x0: Math.max(0, best.x0 - 2),
+        x1: Math.min(vp.width - 6, best.x1 + 2),
         y0: best.y0 - 2,
         y1: best.y1 + 2
       }

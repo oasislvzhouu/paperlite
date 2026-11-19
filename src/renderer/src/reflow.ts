@@ -3614,15 +3614,21 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       const last = bandRows[bandRows.length - 1]
       const y1 = Math.min(last ? last.yTop + Math.max(last.fontSize, 6) + 4 : cap.yTop + 340, 752)
       if (y1 - cap.yTop < bodySize * 2) continue // 下方紧挨正文 → 不算表格
-      cap.tableZone = { x0: band.x0, x1: band.x1, y0: cap.yTop - 2, y1 }
+      cap.tableZone = {
+        x0: band.x0,
+        x1: band.x1,
+        y0: cap.yTop + Math.max(cap.fontSize, 6) + 1,
+        y1
+      }
       cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
       continue
     }
     const all = [cap, ...rows]
+    const bodyTop = rows.length > 0 ? Math.min(...rows.map((l) => l.yTop)) : cap.yTop + Math.max(cap.fontSize, 6) + 1
     cap.tableZone = {
       x0: Math.min(band.x0, Math.min(...all.map((l) => l.x0)) - 2),
       x1: band.x1,
-      y0: Math.min(...all.map((l) => l.yTop)) - 2,
+      y0: bodyTop - 2,
       y1: Math.min(
         boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
         Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4,
@@ -3631,6 +3637,31 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     }
     cap.zoneText = collectZoneText(lines, cap.page, cap.tableZone)
     for (const r of rows) consumed.add(r)
+  }
+  // 重叠表格区校正：同一页两个表注的 zone 互相覆盖时（双栏页按阅读序
+  // 会把邻栏表格行收进同一 zone），上方的表格截到下方 zone 起点；
+  // 完全包含的小 zone 直接清除，避免两张裁图内容重复。
+  const zones = lines
+    .filter((l) => l.tableZone && !l.tableAlgo)
+    .sort((a, b) => a.page - b.page || a.tableZone!.y0 - b.tableZone!.y0)
+  for (let i = 0; i < zones.length; i++) {
+    for (let j = i + 1; j < zones.length; j++) {
+      const a = zones[i]
+      const b = zones[j]
+      if (a.page !== b.page) break
+      const za = a.tableZone!
+      const zb = b.tableZone!
+      const iy = Math.min(za.y1, zb.y1) - Math.max(za.y0, zb.y0)
+      const ix = Math.min(za.x1, zb.x1) - Math.max(za.x0, zb.x0)
+      if (iy <= 0 || ix <= 0) continue
+      const minArea = Math.min((za.x1 - za.x0) * (za.y1 - za.y0), (zb.x1 - zb.x0) * (zb.y1 - zb.y0))
+      if (minArea <= 0 || (iy * ix) / minArea < 0.3) continue
+      if (zb.y0 <= za.y1 && zb.y1 > za.y1 + 2) za.y1 = Math.max(za.y0 + 20, zb.y0 - 2)
+      else if (zb.y0 >= za.y0 && zb.y1 <= za.y1 + 2) {
+        b.tableZone = undefined
+        b.zoneText = undefined
+      }
+    }
   }
   if (consumed.size > 0) {
     if ((globalThis as { __plDbg?: boolean }).__plDbg)
@@ -3794,7 +3825,9 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
       cap.tableZone = {
         x0: prevTbl && prevLine ? Math.min(band.x0, prevLine.x0) - 2 : band.x0,
         x1: band.x1,
-        y0: (prevTbl && prevLine ? prevLine.yTop : cap.yTop) - 2,
+        y0: prevTbl && prevLine
+          ? prevLine.yTop - 2
+          : cap.yTop + Math.max(cap.fontSize, 6) + 1,
         y1: Math.min(last.yTop + Math.max(last.fontSize, 6) + 4, 752)
       }
       cap.tableAlgo = true
@@ -3804,10 +3837,11 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     }
 
     const all: Line[] = prevTbl && prevLine ? [prevLine, cap, ...rows] : [cap, ...rows]
+    const bodyTop = rows.length > 0 ? Math.min(...rows.map((l) => l.yTop)) : cap.yTop + Math.max(cap.fontSize, 6) + 1
     cap.tableZone = {
       x0: Math.min(band.x0, Math.min(...all.map((l) => l.x0)) - 2),
       x1: band.x1,
-      y0: Math.min(...all.map((l) => l.yTop)) - 2,
+      y0: bodyTop - 2,
       y1: Math.min(
         boundary ? boundary.yTop - 2 : Number.POSITIVE_INFINITY,
         Math.max(...all.map((l) => l.yTop + Math.max(l.fontSize, 6))) + 4,
@@ -3920,7 +3954,13 @@ export function markReferences(blocks: ReflowBlock[]): void {
       }
       continue
     }
-    if (b.kind === 'heading' && REFS_END_HEADING_RE.test(t)) break
+    if (
+      b.kind === 'heading' &&
+      (REFS_END_HEADING_RE.test(t) ||
+        /^[A-Z]\.\d/.test(t) || // "D.2 SHORT-TERM FORECASTING"
+        /^[A-Z]\.\s+[A-Z][A-Z\s-]{6,}$/.test(t))
+    )
+      break
     // 条目段（含被章节编号模式误判成 heading 的——作者缩写 "H. Ahmad" 与
     // "A. Section" 撞车）：条目特征（et al./卷期/引号/[N]）降级回段落
     if (b.kind === 'heading' && /et al\.|vol\.|pp\.|["“]|\[\s*\d|doi:|arXiv:/i.test(t)) {
