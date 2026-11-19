@@ -3656,11 +3656,9 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       if (iy <= 0 || ix <= 0) continue
       const minArea = Math.min((za.x1 - za.x0) * (za.y1 - za.y0), (zb.x1 - zb.x0) * (zb.y1 - zb.y0))
       if (minArea <= 0 || (iy * ix) / minArea < 0.3) continue
-      if (zb.y0 <= za.y1 && zb.y1 > za.y1 + 2) za.y1 = Math.max(za.y0 + 20, zb.y0 - 2)
-      else if (zb.y0 >= za.y0 && zb.y1 <= za.y1 + 2) {
-        b.tableZone = undefined
-        b.zoneText = undefined
-      }
+      // 下方的表永远保留（每个 zone 来自各自的表注）；上方表截到下方表注顶部。
+      // 之前"完全包含就删除下方 zone"会把 ICLR p8 Table 5 整张裁图丢掉。
+      if (zb.y0 > za.y0 + 10) za.y1 = Math.max(za.y0 + 20, zb.y0 - 2)
     }
   }
   if (consumed.size > 0) {
@@ -3954,11 +3952,12 @@ export function markReferences(blocks: ReflowBlock[]): void {
       }
       continue
     }
+    // 附录标题常被归成 paragraph（"D.2 SHORT-TERM FORECASTING"）：
+    // 结束文献区不能只看 heading，否则附录全文被标成 ref-entry
     if (
-      b.kind === 'heading' &&
-      (REFS_END_HEADING_RE.test(t) ||
-        /^[A-Z]\.\d/.test(t) || // "D.2 SHORT-TERM FORECASTING"
-        /^[A-Z]\.\s+[A-Z][A-Z\s-]{6,}$/.test(t))
+      REFS_END_HEADING_RE.test(t) ||
+      /^[A-Z]\.\d/.test(t) ||
+      /^[A-Z]\.\s+[A-Z][A-Z\s-]{6,}$/.test(t)
     )
       break
     // 条目段（含被章节编号模式误判成 heading 的——作者缩写 "H. Ahmad" 与
