@@ -634,15 +634,15 @@ body.reflow-mode .zoomer { display: none; }
 }
 #reflow-article.show-trans p.trans { display: block; }
 
+/* 页分隔只做不可见锚点：阅读区是连续重排，不插入"第 N 页"徽标 */
 .page-sep {
-  margin: 2.4em auto 1.6em;
-  width: fit-content;
-  padding: 2px 14px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 12px;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
   user-select: none;
+  pointer-events: none;
 }
 
 /* ── 翻译进度浮标 ───────────────────── */

@@ -2,7 +2,15 @@ import * as pdfjsLib from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
-import { extractReflowBlocks, extractReflowBlocksMupdf, cropPageImages, type MupdfPageLike, type ReflowBlock } from './reflow'
+import {
+  extractReflowBlocks,
+  extractReflowBlocksMupdf,
+  cropPageImages,
+  isFigureCaptionStart,
+  isCaptionText,
+  type MupdfPageLike,
+  type ReflowBlock
+} from './reflow'
 import { applyHighlights, initHighlightEvents, loadHighlights } from './highlights'
 import { recreatePdfWorker } from './worker-mgr'
 import { isPollutedLatex } from './llm-shared'
@@ -426,7 +434,8 @@ function renderReflow(): void {
   let lastPage = 0
   blocks.forEach((b, bi) => {
     if (b.page !== lastPage) {
-      parts.push(`<div class="page-sep" data-page="${b.page}">第 ${b.page} 页</div>`)
+      // 只保留不可见的页锚点：翻页/进度同步依赖 offsetTop，正文完全连贯
+      parts.push(`<div class="page-sep" data-page="${b.page}" aria-hidden="true"></div>`)
       lastPage = b.page
     }
     const body = b.html ?? escapeHtml(b.text)
@@ -505,7 +514,7 @@ function removeTextBlocksInRegions(
     if (b.page !== pageNo || b.top === undefined) return
     if (b.kind === 'image' || b.kind === 'table') return
     if (b.role === 'caption') return
-    if (/^\s*(?:fig(?:ure)?\.?|table|algorithm)\s*\d+/i.test(b.text)) return
+    if (isCaptionText(b.text)) return
     const inside = regions.some(
       (r) =>
         b.top! >= r.y0 - 4 &&
@@ -684,7 +693,33 @@ function suppressBlocksInsideTables(blocks: ReflowBlock[]): void {
         (b.left ?? t.rect.x0) >= t.rect.x0 - 12 &&
         (b.left ?? t.rect.x0) <= t.rect.x1 + 12
     )
-    if (inside) blocks.splice(i, 1)
+    if (!inside) continue
+    // 只有"被图内数字行隔断的句子"才需要把前后段拼回；表格单元格/图内
+    // 文字块被裁图覆盖时直接丢弃。否则前后段合并会把图注吞进单元格再删掉
+    // （MDPI p13 的 Figure 9 图注曾因此整块消失）。
+    const nums = (b.text.match(/\d+(?:\.\d+)?/g) ?? []).length
+    const words = (b.text.match(/[A-Za-z]{3,}/g) ?? []).length
+    const numericRow = nums >= 2 && words <= 2
+    const prev = blocks[i - 1]
+    const next = blocks[i + 1]
+    if (
+      numericRow &&
+      prev &&
+      next &&
+      prev.page === b.page &&
+      next.page === b.page &&
+      prev.kind === 'paragraph' &&
+      next.kind === 'paragraph' &&
+      !prev.role &&
+      !next.role &&
+      /^[a-z(,]/.test(next.text.trim()) &&
+      !/[.!?;:]$/.test(prev.text.trim())
+    ) {
+      prev.text = `${prev.text.trim()} ${next.text.trim()}`.replace(/\s+/g, ' ').trim()
+      prev.html = `${prev.html ?? prev.text} ${next.html ?? next.text}`
+      blocks.splice(i + 1, 1)
+    }
+    blocks.splice(i, 1)
   }
 }
 
@@ -772,7 +807,7 @@ async function refineAtomicRects(blocks: ReflowBlock[]): Promise<void> {
             x.top !== undefined &&
             x.top > best!.y0 &&
             x.top < best!.y1 + 460 &&
-            /^\s*fig(?:ure)?\.?\s*\d+/i.test(x.text)
+            isFigureCaptionStart(x.text)
         )
         if (hasFigCap) {
           const mid = (best.y0 + best.y1) / 2
@@ -951,6 +986,64 @@ async function attachVectorFigures(): Promise<void> {
       const mp = mupdfDocRef.loadPage(p - 1) as unknown as { getBounds: () => number[] }
       const bounds = mp.getBounds()
       const vpW = bounds[2] - bounds[0]
+      // 页面文本行缓存：图注上方没有正文块时，用"非正文行"的最高 y 估图顶，
+      // 避免把上一段正文裁进图里（MDPI p14：段落被跨页合并后，图前正文
+      // 已不在 blocks 中，按图注固定上探 320pt 会把 5 行正文烤进裁图）
+      let rawLineCache: Array<{ x0: number; x1: number; y: number; text: string }> | null | undefined
+      const rawLines = (): Array<{ x0: number; x1: number; y: number; text: string }> => {
+        if (rawLineCache !== undefined) return rawLineCache ?? []
+        try {
+          const stObj = (mp as unknown as { toStructuredText: () => { asJSON: () => string } }).toStructuredText()
+          const st = JSON.parse(stObj.asJSON())
+          const out: Array<{ x0: number; x1: number; y: number; text: string }> = []
+          for (const b of st.blocks ?? []) {
+            for (const l of b.lines ?? []) {
+              const text = String(l.text ?? '').replace(/\s+/g, ' ').trim()
+              if (!text || !l.bbox) continue
+              out.push({ x0: l.bbox.x, x1: l.bbox.x + l.bbox.w, y: l.bbox.y, text })
+            }
+          }
+          rawLineCache = out
+          return out
+        } catch {
+          rawLineCache = null
+          return []
+        }
+      }
+      const figureTopBoundary = (capTop: number): number | null => {
+        const lines = rawLines().filter(
+          (l) => l.y >= capTop - 360 && l.y <= capTop - 2 && l.y >= 80
+        )
+        if (lines.length === 0) return null
+        const prose = lines.filter((l) => {
+          const words = l.text.split(/\s+/).filter(Boolean).length
+          return l.x1 - l.x0 >= vpW * 0.5 && words >= 6
+        })
+        if (prose.length > 0) {
+          // 正文段落的最后一行之后：把紧跟其后的短尾行（"is domain invariant."）
+          // 也算进正文，避免把段落尾巴裁进图里
+          let bottom = Math.max(...prose.map((l) => l.y)) + 13
+          for (let k = 0; k < 3; k++) {
+            const tail = lines.find(
+              (l) =>
+                l.y >= bottom - 2 &&
+                l.y <= bottom + 6 &&
+                l.x1 - l.x0 < vpW * 0.5 &&
+                l.x0 < vpW * 0.35
+            )
+            if (!tail) break
+            bottom = tail.y + 13
+          }
+          return bottom + 4
+        }
+        // 无正文：取图注上方最高的非页眉行作为图顶
+        let top = Number.POSITIVE_INFINITY
+        for (const l of lines) {
+          if (/^(sensors\s+\d{4}.*|.*\b\d+\s+of\s+\d+)$/i.test(l.text)) continue
+          if (l.y < top) top = l.y
+        }
+        return Number.isFinite(top) ? top - 10 : null
+      }
       const pageBlocks = blocks.filter((b) => b.page === p && b.top !== undefined)
       const regions: Array<{
         x0: number
@@ -961,7 +1054,7 @@ async function attachVectorFigures(): Promise<void> {
         cap: ReflowBlock
       }> = []
       for (const cap of pageBlocks) {
-        if (!/^\s*fig(?:ure)?\.?\s*\d+/i.test(cap.text) || cap.top === undefined) continue
+        if (!isFigureCaptionStart(cap.text) || cap.top === undefined) continue
         const prev = pageBlocks
           .filter((b) => b !== cap && b.top !== undefined && b.top < cap.top! - 2 && b.kind !== 'image')
           .sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
@@ -977,6 +1070,18 @@ async function attachVectorFigures(): Promise<void> {
             b.right - b.left >= vpW * 0.5
         )
         const prevBody = bodyLike.sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
+        // 上一张图的图注（MDPI p12：Figure 7 与 Figure 8 上下叠放）：
+        // 它是本图区的上边界，但不属于图内标签，不能用 prev（可能是图内文字）
+        const prevCaption = pageBlocks
+          .filter(
+            (b) =>
+              b !== cap &&
+              b.top !== undefined &&
+              b.bottom !== undefined &&
+              b.top < cap.top! - 2 &&
+              isCaptionText(b.text)
+          )
+          .sort((a, b) => (b.top ?? 0) - (a.top ?? 0))[0]
         const tableAbove = pageBlocks
           .filter(
             (b) =>
@@ -987,21 +1092,25 @@ async function attachVectorFigures(): Promise<void> {
         let y0: number
         if (prevBody || tableAbove) {
           y0 = Math.max(0, Math.max(prevBody?.bottom ?? 0, tableAbove?.rect?.y1 ?? 0) + 2)
-        } else if (cap.top <= 260) {
-          // 图注在页顶且上方无块（MDPI Fig.5）：图就在注上方 90-190pt，
-          // 从注上方 120pt 起裁，避开页眉
-          y0 = Math.max(70, cap.top - 120)
-        } else if (cap.top > 140) {
-          // 无正文块可依（跨页段落归属上一页）：按图注上方 200pt 估图区
-          y0 = Math.max(0, cap.top - 200)
+        } else if (prevCaption) {
+          y0 = Math.max(0, (prevCaption.bottom ?? (prevCaption.top ?? 0) + 12) + 4)
         } else {
-          continue
+          // 无正文/图注可依：正文尾行之后或图注上方最高非页眉行
+          const boundary = figureTopBoundary(cap.top)
+          y0 = Math.max(70, boundary !== null ? boundary : cap.top - 200)
         }
         const y1 = cap.top - 4
         if (y1 - y0 < 40) continue
         const left = Math.min(prev?.left ?? cap.left ?? 30, cap.left ?? 30)
         const right = Math.max(prev?.right ?? left + 300, cap.right ?? cap.left ?? left + 300)
-        regions.push({ x0: left - 4, y0, x1: right + 4, y1, capBi: blocks.indexOf(cap), cap })
+        // 图注宽度通常窄于图体（Fig.7 图注 284pt、图体 430pt）：左右各
+        // 放宽图注宽度的 28%，让坐标轴/色标进入裁图；cropMupdfRegion 会
+        // 再按非白像素修剪，不会把版心外的空白留下
+        const capW = Math.max(80, right - left)
+        const padX = Math.max(48, capW * 0.28)
+        const rx0 = Math.max(20, left - padX)
+        const rx1 = Math.min(vpW - 12, right + padX)
+        regions.push({ x0: rx0, y0, x1: rx1, y1, capBi: blocks.indexOf(cap), cap })
       }
       if (regions.length > 0) removeTextBlocksInRegions(p, regions)
       for (const reg of regions) {
@@ -1020,7 +1129,7 @@ async function attachVectorFigures(): Promise<void> {
             b.top !== undefined &&
             b.top < 260 &&
             b.kind === 'paragraph' &&
-            /^\s*fig(?:ure)?\.?\s*\d+/i.test(b.text)
+            isFigureCaptionStart(b.text)
         )
         if (topCaps.length > 0) {
           // 图注在页顶时，图常在注下方（caption-above-figure 版式）
@@ -1112,7 +1221,7 @@ async function attachImages(): Promise<void> {
         mask?: Array<{ x0: number; y0: number; x1: number; y1: number }>
       }> = []
       for (const cap of pageBlocks) {
-        if (!/^\s*fig(?:ure)?\.?\s*\d+/i.test(cap.text)) continue
+        if (!isFigureCaptionStart(cap.text)) continue
         if (cap.top === undefined) continue
         const prev = pageBlocks
           .filter((b) => b !== cap && b.top !== undefined && b.top < cap.top! - 2 && b.kind !== 'image')

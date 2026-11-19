@@ -477,10 +477,15 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
 
   // 边栏簇：平均行宽 < 15% 页宽（正文行通常 > 20%）；图片行不参与边栏判定
   const avgW = (ls: Line[]) => ls.reduce((n, l) => n + (l.x1 - l.x0), 0) / ls.length
+  // 边栏必须贴页面左/右边缘。图表内部的坐标轴数字（"1.000"、"0.000"…）
+  // 也是窄行，但位于版心内部；若判成边栏会被整组移到页尾，再被跨页段落
+  // 合并吸进正文（曾出现 "…is crucial 0.000 and challenging…"）。
+  const atMargin = (ls: Line[]) =>
+    ls.every((l) => l.x1 < pageWidth * 0.22 || l.x0 > pageWidth * 0.78)
   // 公式碎片（分式/上下标）也是窄行，曾被当成边栏整组排到页尾
   // （MDPI 第 6 页三条公式全部掉到正文之后）——数学行不参与边栏判定
   const isSidebar = (ls: Line[]) =>
-    avgW(ls) < pageWidth * 0.15 && ls.length >= 3 && ls.every((l) => !isMathishLine(l))
+    avgW(ls) < pageWidth * 0.15 && ls.length >= 3 && atMargin(ls) && ls.every((l) => !isMathishLine(l))
 
   const main: Line[] = []
   const sidebar: Line[] = []
@@ -523,7 +528,17 @@ export function orderLines(lines: Line[], pageWidth: number, pageHeight?: number
 
   const realSpanning = bodyMain.filter((l) => isSpanning(l) && !isNarrowFormula(l))
   const midFormulas = bodyMain.filter((l) => isSpanning(l) && isNarrowFormula(l))
-  if (realSpanning.length >= bodyMain.length * 0.25) {
+  // 单栏页的识别不能只看"通栏行占比"：整页只有少数图表的页面里，
+  // 图内标签把 left/right 凑够数就会误判双栏（MDPI 第 12 页 Figure 7）。
+  // 真正的通栏正文行同时顶到左右页边；双栏页的跨栏标题/图注不会。
+  const fullWidthProse = realSpanning.filter(
+    (l) =>
+      l.page !== 1 &&
+      l.text.trim().length > 60 &&
+      l.x0 < pageWidth * 0.16 &&
+      l.x1 > pageWidth * 0.84
+  ).length
+  if (realSpanning.length >= bodyMain.length * 0.25 || fullWidthProse >= 2) {
     return [...orderLocalColumns(mainSorted), ...sidebar.sort(topDown)] // 大量整行 → 单栏
   }
 
@@ -1273,9 +1288,9 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
     const isListItem =
       kind === 'paragraph' && !inRefZone && LIST_ITEM_RE.test(l.text.trim()) && l.text.length < 160
 
-    // 图注/表注独占一段（"Fig. 1. …" 曾被并入上一段正文）
-    const isCaptionLine =
-      kind === 'paragraph' && /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)/i.test(l.text)
+    // 图注/表注独占一段。正文续行以 "Figure 7 that…" 开头时不是图注：
+    // 编号后必须是句点/冒号/破折号，或紧跟大写词/数字（图注标题）
+    const isCaptionLine = kind === 'paragraph' && isFigureCaptionStart(l.text)
     // 页脚行（通讯邮箱/doi/版权/收稿日期）不能与上一段或下一页正文粘连：
     // 曾把下一页首段整段吞进 E-mail 块
     const FOOTER_LINE_RE =
@@ -1293,6 +1308,10 @@ export function linesToBlocks(lines: Line[], bodySize: number): ReflowBlock[] {
         (/^\d{1,2}[A-Z][a-z]/.test(tNow) && !/^\d{1,2}[A-Z][a-z]/.test(prevBuf.trim())) )
     let brk =
       bufT.length === 0 ||
+      // 页边界必须断块：页尾与下一页页首行 y 坐标不可比，跨页合并会把
+      // 页尾的图内标签（或页首页眉）吸进段落。真正的跨页续段交给
+      // mergePageBoundaryParagraphs 统一处理。
+      l.page !== bufPage ||
       kind !== bufKind ||
       isListItem ||
       isCaptionLine ||
@@ -2847,6 +2866,7 @@ export async function extractReflowBlocksMupdf(pages: MupdfPageLike[]): Promise<
   absorbFormulaFragments(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  dropFigureAxisLabels(blocks, bodySize)
   mergeHeadingContinuation(blocks)
   splitHeadingBody(blocks)
   markReferences(blocks)
@@ -3136,6 +3156,7 @@ export async function extractReflowBlocks(doc: PDFDocumentProxy): Promise<Reflow
   mergeFormulaDebris(blocks, bodySize)
   markFormulaContinuation(blocks)
   markCaptions(blocks)
+  dropFigureAxisLabels(blocks, bodySize)
   mergeHeadingContinuation(blocks)
   splitHeadingBody(blocks)
   markReferences(blocks)
@@ -3386,7 +3407,30 @@ function demoteFootnotes(blocks: ReflowBlock[], bodySize: number): void {
 /* ── 表格区域识别：表注（TABLE II / 表2，含罗马数字）之后的表格体行
  *    整体渲染为图片块，避免单元格文本被线性化成乱序段落 ── */
 
-const TABLE_CAPTION_RE = /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
+/** 图注/表注起始判据（大小写敏感的后半段：编号后不能直接跟小写词，
+ *  "Figure 7 that…" 是正文续行，不是图注）。 */
+function captionTailOk(restRaw: string): boolean {
+  const rest = restRaw.trimStart()
+  return rest === '' || /^[.:：\-–—|]/.test(rest) || /^[A-Z0-9(]/.test(rest)
+}
+export function isFigureCaptionStart(text: string): boolean {
+  const m = /^\s*(?:fig(?:ure)?\.?|图)\s*(?:[IVXLC]{1,6}|\d+)\b/i.exec(text)
+  return !!m && captionTailOk(text.slice(m[0].length))
+}
+function isTableCaptionStart(text: string): boolean {
+  const m = /^\s*(?:table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i.exec(text)
+  return !!m && captionTailOk(text.slice(m[0].length))
+}
+function isAlgorithmCaptionStart(text: string): boolean {
+  const m = /^\s*algorithm\s*(?:\d{1,3}|[IVXLC]{1,6})\b/i.exec(text)
+  return !!m && captionTailOk(text.slice(m[0].length))
+}
+export function isCaptionText(text: string): boolean {
+  return isFigureCaptionStart(text) || isTableCaptionStart(text) || isAlgorithmCaptionStart(text)
+}
+
+const TABLE_CAPTION_RE =
+  /^\s*(table|表)\s*(?:[IVXLC]{1,6}|\d+)\b/i
 
 /** Elsevier 首页模板：按 y 带强制分类，避免通用启发式在报头/作者/
  *  关键词/摘要区误判（这些区域字号层次与正文差异大且混排）。 */
@@ -3486,7 +3530,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
     return false
   }
   const isProse = (l: Line): boolean => {
-    if (TABLE_CAPTION_RE.test(l.text)) return false
+    if (isTableCaptionStart(l.text)) return false
     if (l.text.length > 70 && l.wordCount >= 10) return true
     // 短行正文（窄栏/缩排段每行 50-70 字符）：大写单词开头、8 词以上、
     // 无多位数字 → 句子而非表格单元格
@@ -3566,7 +3610,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
   const consumed = new Set<Line>()
   for (const cap of [...lines]) {
     if (cap.skip) continue
-    if (!TABLE_CAPTION_RE.test(cap.text.trim())) continue
+    if (!isTableCaptionStart(cap.text.trim())) continue
     if (cap.text.trim().length > 130) continue
     // 行内散文提及 "Table V reports the 95% CI of…"：编号后紧跟小写词
     const afterNum = cap.text.trim().replace(TABLE_CAPTION_RE, '').trim().replace(/^[.:：，,、\-—–]\s*/, '')
@@ -3584,7 +3628,7 @@ export function detectTableZones(lines: Line[], bodySize: number): void {
       if (l.yTop - prevY > bodySize * 2.4) break
       if (isRefEntry(l) || isFooterLike(l) || isProse(l) || isSectionHeadingLine(l)) break
       // 下一个表注（同页连续排版的 TABLE N / 表N）→ 当前表结束
-      if (TABLE_CAPTION_RE.test(l.text.trim())) break
+      if (isTableCaptionStart(l.text.trim())) break
       // 图注绝不可能是表格行（MDPI Table 3 后面紧跟 Figure 9，曾被吞进裁图）
       if (/^\s*(?:fig(?:ure)?\.?)\s*\d+/i.test(l.text.trim())) break
       if (l.fontSize > bodySize * 1.5) break
@@ -3728,7 +3772,7 @@ function isAlgoBodyLine(l: Line): boolean {
   // calculated as" 曾被当作伪代码行 → 算法框裁图吞掉后文与下一个公式）
   if (l.wordCount > 12) return false
   if (ALGO_CAPTION_RE.test(t)) return false // 下一个算法框
-  if (CAPTION_RE.test(t) || TABLE_CAPTION_RE.test(t)) return false // 图/表注
+  if (isCaptionText(t)) return false // 图/表注
   if (/^\s*\d{1,2}\s*[:.)\-]/.test(t)) return true // 编号步骤 "1:" "2)"
   if (
     /^(input|output|requires?|ensures?|given|initialize[ds]?|procedure|return|repeat|while|until|end)\b/i.test(
@@ -3848,7 +3892,7 @@ export function detectAlgorithms(lines: Line[], bodySize: number): void {
     const prevTbl = !!(
       prevLine &&
       !prevLine.tableZone &&
-      TABLE_CAPTION_RE.test(prevLine.text.trim()) &&
+      isTableCaptionStart(prevLine.text.trim()) &&
       cap.yTop - (prevLine.yTop + Math.max(prevLine.fontSize, 6)) < bodySize * 1.5
     )
 
@@ -3922,12 +3966,67 @@ function markFormulaContinuation(blocks: ReflowBlock[]): void {
   }
 }
 
-/** 图题/表题识别（"Fig. 1. xxx"、"图2 xxx"、"TABLE II"）→ caption 角色 */
-const CAPTION_RE = /^\s*(fig\.?|figure|图)\s*(?:[IVXLC]{1,6}|\d+)\b|^\s*(表|table)\s*(?:[IVXLC]{1,6}|\d+)\b/i
+/** 图内坐标轴标题（"Time(ms/signal)"、"Accuracy"）常被文本层单独提出，
+ *  字号大、无句子结构；附近有图注时删除（裁图里已包含）。 */
+function dropFigureAxisLabels(blocks: ReflowBlock[], bodySize: number): void {
+  const caps = blocks.filter(
+    (b) => b.role === 'caption' && b.top !== undefined && isFigureCaptionStart(b.text)
+  )
+  if (caps.length === 0) return
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i]
+    if (b.role || b.kind === 'formula' || b.kind === 'table' || b.kind === 'image') continue
+    if (b.top === undefined) continue
+    const t = b.text.trim()
+    const nearCap = caps.some((c) => c.page === b.page && Math.abs((c.top ?? 0) - b.top!) < 420)
+    if (!nearCap) continue
+    const axis =
+      t.length <= 40 &&
+      (b.firstFontSize ?? 0) >= bodySize * 1.4 &&
+      /^[A-Za-z][A-Za-z0-9 .\/_-]*(?:\([^)]*\))?$/.test(t)
+    const nums = (t.match(/\d+(?:\.\d+)?/g) ?? []).length
+    const digits = (t.match(/\d/g) ?? []).length
+    // 图下方的数据条（"Accuracy(%) 82.07 88.80 … time(ms)"）：裁图已包含，
+    // 文本层留着会插进段落中间把句子切断
+    const numericRow = nums >= 6 && digits / Math.max(1, t.length) > 0.25
+    // 离散的坐标轴刻度（"1.000"、"0.000"）或一整行 x 轴刻度
+    // （"90 120 300 900 …"）单独成块：紧邻图注，纯数字
+    const numericOnly =
+      nums >= 1 && t.length <= 80 && /^[\d\s.,%+\-−–]+$/.test(t)
+    // 图例数据行的首段（"Accuracy(%) 82.07"）：带单位、数值占比高，
+    // 裁图里已有，文本层不能再送进正文/图注之间
+    const unitRow = t.length <= 40 && nums >= 1 && /%|\((?:ms|db|hz|s)\)/i.test(t)
+    if (!axis && !numericRow && !numericOnly && !unitRow) continue
+    // 被数据条隔断的句子：前段无句末标点时与后段拼回。
+    // 只拼"正文→小写续句"：图内数字块之间、以及数字块与图注之间
+    // 不能拼接（否则 Figure 7 图注会被吸进图例数字块后丢掉）。
+    const prev = blocks[i - 1]
+    const next = blocks[i + 1]
+    if (
+      prev &&
+      next &&
+      prev.page === b.page &&
+      next.page === b.page &&
+      prev.kind === 'paragraph' &&
+      next.kind === 'paragraph' &&
+      !prev.role &&
+      !next.role &&
+      /[a-z]{3,}/.test(prev.text) &&
+      /^[a-z(,]/.test(next.text.trim()) &&
+      !/[.!?;:]$/.test(prev.text.trim())
+    ) {
+      prev.text = `${prev.text.trim()} ${next.text.trim()}`.replace(/\s+/g, ' ').trim()
+      prev.html = `${prev.html ?? prev.text} ${next.html ?? next.text}`
+      blocks.splice(i + 1, 1)
+    }
+    blocks.splice(i, 1)
+  }
+}
+
 function markCaptions(blocks: ReflowBlock[]): void {
   let hits = 0
   for (const b of blocks) {
-    const m = CAPTION_RE.test(b.text)
+    const m = isCaptionText(b.text)
     if (m && b.kind === 'paragraph' && !b.role && b.text.length < 350) {
       b.role = 'caption'
       hits++
