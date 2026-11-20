@@ -21,7 +21,10 @@ import { initMediaTools } from './media-tools'
 
 type Mode = 'reflow' | 'original'
 
-/** 版面宽度三档（对齐原版可调宽度），localStorage 持久化 */
+/** 版面宽度三档（对齐原版可调宽度），localStorage 持久化。
+ *  宽度用 px 固定（按 16px 基准字号换算），字号增减只改变正文大小，
+ *  不改变栏宽——否则图表/表格/公式裁图会随正文字号一起放大缩小。 */
+const WIDTH_BASE_FONT_PX = 16
 const WIDTHS = [
   { em: 42, label: '窄' },
   { em: 56, label: '宽' },
@@ -32,10 +35,11 @@ let widthIdx = WIDTHS.length - 1
 
 function applyWidth(): void {
   const w = WIDTHS[widthIdx]
-  $('#reflow-article').style.setProperty('--reflow-width', `${w.em}em`)
+  const px = Math.round(w.em * WIDTH_BASE_FONT_PX)
+  $('#reflow-article').style.setProperty('--reflow-width', `${px}px`)
   const btn = $('#width-btn')
   btn.textContent = w.label
-  btn.title = `版面宽度：${w.label}（${w.em}em，点击切换）`
+  btn.title = `版面宽度：${w.label}（${px}px，点击切换）`
 }
 
 interface TocEntry {

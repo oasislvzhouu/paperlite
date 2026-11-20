@@ -454,7 +454,9 @@ body.reflow-mode .zoomer { display: none; }
 
 #reflow-article {
   --reflow-font: 17px;
-  --reflow-width: 56em;
+  /* 栏宽按 16px 基准字号固定，字号增减不改变栏宽（图表/裁图不跟着缩放） */
+  --reflow-base-font: 16px;
+  --reflow-width: 896px;
   max-width: var(--reflow-width);
   margin: 28px auto 0;
   font-family: var(--font-article);
@@ -463,7 +465,6 @@ body.reflow-mode .zoomer { display: none; }
   color: var(--text);
   letter-spacing: 0.2px;
   padding-bottom: 60px;
-  transition: max-width 0.2s ease;
 }
 /* 对齐 Scholaread SR-Article 实测参数：段距 1.5em、行高可调（1.4 / 1.75 / 1.8） */
 #reflow-article p {
@@ -578,10 +579,11 @@ body.reflow-mode .zoomer { display: none; }
 }
 #reflow-article p.caption + figure.figure { margin-top: 0.4em; }
 
-/* 公式块：数学字体独立排版（引擎按嵌入数学字体识别） */
+/* 公式块：数学字体独立排版（引擎按嵌入数学字体识别）。
+ * 字号固定按基准字号换算，不随正文字号增减（公式裁图/KaTeX 都保持原尺寸）。 */
 #reflow-article .formula {
   font-family: var(--font-math);
-  font-size: 0.98em;
+  font-size: calc(var(--reflow-base-font) * 0.98);
   text-align: center;
   direction: ltr;
   margin: 1.1em auto;
