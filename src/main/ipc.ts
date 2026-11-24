@@ -135,27 +135,37 @@ export function registerIpc(): void {
     return true
   })
 
-  let interactiveTranslationInFlight = false
-  ipcMain.handle('translator:busy', () => interactiveTranslationInFlight)
-
+  /** 进行中的交互翻译个数（切换文献时前后两次可能短暂并存） */
+  let interactiveTranslations = 0
+  ipcMain.handle('translator:busy', () => interactiveTranslations > 0)
   ipcMain.handle('llm:status', () => llmStatus())
 
   ipcMain.handle(
     'translate:paragraphs',
-    async (evt, texts: string[], lang: string = 'zh-CN'): Promise<string[]> => {
+    async (
+      evt,
+      texts: string[],
+      lang: string = 'zh-CN',
+      doneOffset = 0
+    ): Promise<string[]> => {
     if (!Array.isArray(texts) || texts.length === 0) return []
-    console.log(`[paperlite-main] 翻译请求：${texts.length} 段`)
-    interactiveTranslationInFlight = true
+    console.log(`${new Date().toTimeString().slice(0, 8)} [paperlite-main] 翻译请求：${texts.length} 段`)
+    interactiveTranslations++
     try {
-      return await translateParagraphs(texts, lang, (done, total) => {
-        try {
-          evt.sender.send('translation:progress', { done, total, kind: 'interactive' })
-        } catch {
-          /* 窗口可能已关闭 */
-        }
-      })
+      return await translateParagraphs(
+        texts,
+        lang,
+        (done, total, aborted) => {
+          try {
+            evt.sender.send('translation:progress', { done, total, kind: 'interactive', aborted })
+          } catch {
+            /* 窗口可能已关闭 */
+          }
+        },
+        Number(doneOffset) || 0
+      )
     } finally {
-      interactiveTranslationInFlight = false
+      interactiveTranslations--
     }
   })
 
@@ -282,7 +292,10 @@ export function registerIpc(): void {
     }
   )
 
-  /** 导入后预翻译：跳过已缓存的，其余后台跑（不阻塞调用方），完成即入库 */
+  /** 预翻译任务串行执行：多篇同时跑会并发几十个请求，挤占正在阅读的交互翻译 */
+  let prefetchChain: Promise<void> = Promise.resolve()
+
+  /** 导入后预翻译：跳过已缓存的，其余后台跑（不阻塞调用方），每批译完即入库 */
   ipcMain.handle(
     'translations:prefetch',
     async (evt, texts: string[]): Promise<{ cached: number; queued: number }> => {
@@ -290,40 +303,57 @@ export function registerIpc(): void {
       const todo: string[] = []
       let cached = 0
       for (const t of texts) {
-        if (t.length < 30) continue
         if (stmt.get(shaOf(t))) cached++
         else todo.push(t)
       }
       if (todo.length > 0) {
-        console.log(`[paperlite-main] 预翻译：${todo.length} 段（命中缓存 ${cached}）`)
+        console.log(`${new Date().toTimeString().slice(0, 8)} [paperlite-main] 预翻译：${todo.length} 段（命中缓存 ${cached}）`)
         const sender = evt.sender
-        void (async () => {
+        const run = prefetchChain.then(async () => {
+          // 每批译完立即入库：期间用户打开这篇论文时，补翻只请求还没译到的段
+          const put = getDb().prepare(
+            'INSERT OR REPLACE INTO translations (src_sha, trans, created_at) VALUES (?, ?, ?)'
+          )
+          let stored = 0
           try {
-            const results = await translateParagraphs(todo, 'zh-CN', (done, total) => {
-              try {
-                sender.send('translation:progress', { done, total, kind: 'prefetch' })
-              } catch {
-                /* 窗口可能已关闭 */
-              }
-            })
-            const items = todo
-              .map((text, i) => ({ text, trans: results[i] ?? '' }))
-              .filter((x) => x.trans)
-            if (items.length > 0) {
-              const put = getDb().prepare(
-                'INSERT OR REPLACE INTO translations (src_sha, trans, created_at) VALUES (?, ?, ?)'
-              )
-              getDb().transaction(() => {
-                for (const it of items) {
-                  put.run(shaOf(it.text), it.trans, new Date().toISOString())
+            await translateParagraphs(
+              todo,
+              'zh-CN',
+              (done, total, aborted) => {
+                try {
+                  sender.send('translation:progress', { done, total, kind: 'prefetch', aborted })
+                } catch {
+                  /* 窗口可能已关闭 */
                 }
-              })()
-              console.log(`[paperlite-main] 预翻译完成并入库：${items.length} 段`)
-            }
+              },
+              0,
+              {
+                // 交互翻译优先：阅读中打开的那篇先译完，预翻译再继续
+                beforeBatch: async () => {
+                  while (interactiveTranslations > 0) await new Promise((r) => setTimeout(r, 1000))
+                },
+                // 排队期间可能已被交互翻译补上：整批都有缓存就不再请求
+                skip: (batch) => batch.every((t) => stmt.get(shaOf(t))),
+                onBatch: (start, part) => {
+                  stored += getDb().transaction(() => {
+                    let n = 0
+                    part.forEach((trans, k) => {
+                      if (!trans) return
+                      put.run(shaOf(todo[start + k]), trans, new Date().toISOString())
+                      n++
+                    })
+                    return n
+                  })()
+                }
+              }
+            )
+            console.log(`${new Date().toTimeString().slice(0, 8)} [paperlite-main] 预翻译完成并入库：${stored} 段`)
           } catch (err) {
-            console.log('[paperlite-main] 预翻译失败：', err)
+            console.log(`[paperlite-main] 预翻译失败（已入库 ${stored} 段）:`, err)
           }
-        })()
+        })
+        // 某一篇失败不阻塞后面排队的任务
+        prefetchChain = run.catch(() => {})
       }
       return { cached, queued: todo.length }
     }

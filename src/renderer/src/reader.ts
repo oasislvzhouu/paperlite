@@ -503,7 +503,14 @@ function renderReflow(): void {
   // 引用角标转链接（只改结构不改文本，highlight 偏移不受影响）
   linkCitations()
   article.classList.remove('show-trans', 'has-trans')
+  // 翻译按钮状态随文献重置（上一文献的「已译」不能带到这一篇）
+  const transBtn = $('#translate-btn') as HTMLButtonElement
+  transBtn.textContent = '译'
+  transBtn.title = TRANS_BTN_TITLE
+  transBtn.classList.remove('toggle-on')
 }
+
+const TRANS_BTN_TITLE = 'AI 翻译（GLM，双语对照）'
 
 /** 渐进图片挂载：文本渲染后逐页补图（单页 4s 护栏，失败不影响阅读） */
 /** 插图/图区内的文字块（坐标轴标签、图内注释）由裁图呈现，
@@ -1771,99 +1778,133 @@ function insertTrans(bi: number, trans: string): void {
   el.after(t)
 }
 
+/** 可翻译段落：阅读器实际显示的正文块。预翻译与阅读器必须用同一判据——
+ *  译文缓存键是段落原文，两边的段落原文要逐字一致。 */
+function isTranslatable(b: ReflowBlock): boolean {
+  return b.kind === 'paragraph' && b.role !== 'ref-entry'
+}
+
 function paragraphIndexes(): Array<{ bi: number; text: string }> {
   if (!blocks) return []
   return blocks
     .map((b, bi) => ({ b, bi }))
     // 参考文献条目不译（对标 no_trans）：引用串翻译无意义且烧配额
-    .filter((x) => x.b.kind === 'paragraph' && x.b.role !== 'ref-entry')
+    .filter((x) => isTranslatable(x.b))
     .map((x) => ({ bi: x.bi, text: x.b.text }))
 }
 
-/** 打开文档后：只从本地缓存恢复译文（无网络请求，秒显） */
-async function hydrateTranslations(): Promise<void> {
-  const paras = paragraphIndexes()
-  if (paras.length === 0) return
-  try {
-    const cached = await window.paperlite.translationsGet(paras.map((p) => p.text))
-    let hits = 0
-    for (const p of paras) {
-      const t = cached[p.text]
-      if (t) {
-        insertTrans(p.bi, t)
-        hits++
-      }
-    }
-    if (hits > 0) {
-      $('#reflow-article').classList.add('has-trans', 'show-trans')
-      const btn = $('#translate-btn') as HTMLButtonElement
-      btn.classList.add('toggle-on')
-      btn.textContent = hits >= paras.length ? '已译' : `译 ${hits}/${paras.length}`
-      // 缓存不完整（重排版本变更导致段落键失配）→ 自动补翻缺失段
-      if (hits < paras.length) void translateFlow()
-    }
-  } catch {
-    /* 缓存不可用不影响阅读 */
-  }
+/** 与 openReader 同一条提取管线（MuPDF 行分组 + 表格内文字抑制），返回
+ *  可翻译段落原文。后台预翻译必须走这里：缓存键是段落原文，换一条提取
+ *  管线（如 pdf.js 文本层）分段不同，预翻译的译文在阅读器里全对不上。 */
+export async function extractReaderParagraphs(id: number): Promise<string[]> {
+  const res = await fetch(window.paperlite.pdfUrl(id))
+  const buf = new Uint8Array(await res.arrayBuffer())
+  const mupdfMod = await loadMupdf()
+  const mupdfDoc = mupdfMod.Document.openDocument(buf, 'application/pdf')
+  const pages: MupdfPageLike[] = []
+  for (let p = 0; p < mupdfDoc.countPages(); p++) pages.push(mupdfDoc.loadPage(p))
+  const blks = await extractReflowBlocksMupdf(pages)
+  suppressBlocksInsideTables(blks)
+  return blks.filter(isTranslatable).map((b) => b.text)
 }
 
-/** AI 翻译：缓存优先，缺的走 LLM，结果写回缓存 */
-async function translateFlow(): Promise<void> {
+/** 打开文档后：从本地缓存恢复译文（无网络请求，秒显），缺的段落后台补翻 */
+async function hydrateTranslations(): Promise<void> {
+  await translateFlow(true)
+}
+
+/** 正在补翻的文献 id（0 = 空闲）：同一文献不重复发起 */
+let translatingReadingId = 0
+/** 进行中的补翻个数：>0 时翻译按钮禁用（切换文献后旧流程可能仍在收尾） */
+let transFills = 0
+/** 翻译流程序号：切换文献后，旧流程不再改写译文与按钮 */
+let transFlowSeq = 0
+
+/** AI 翻译：缓存优先，缺的走 LLM，结果写回缓存。
+ *  译文齐全时按钮只负责显示/隐藏；有缺失时（打开文档自动触发，或点击
+ *  按钮）一律先补翻。auto=true 为自动补全：失败只更新计数，不弹窗。 */
+async function translateFlow(auto = false): Promise<void> {
   const article = $('#reflow-article')
   const btn = $('#translate-btn') as HTMLButtonElement
   if (!blocks || !doc) return
-  if (article.classList.contains('has-trans')) {
-    article.classList.toggle('show-trans')
-    btn.classList.toggle('toggle-on', article.classList.contains('show-trans'))
-    return
-  }
-  const status = await window.paperlite.llmStatus()
-  const paras = paragraphIndexes()
-  const texts = paras.map((p) => p.text)
-
-  const lang = getSettings().lang
-  const cached = await window.paperlite.translationsGet(texts, lang)
-  for (const p of paras) {
-    if (cached[p.text]) insertTrans(p.bi, cached[p.text])
-  }
-  if (Object.keys(cached).length > 0) article.classList.add('has-trans', 'show-trans')
-
-  const missing = texts.filter((t) => !cached[t])
-  if (missing.length === 0) {
-    btn.textContent = '已译'
-    btn.classList.add('toggle-on')
-    return
-  }
-  if (!status.hasKey) {
-    alert('部分段落无缓存译文，且未配置翻译 API Key（settings.json → llm.apiKey）。')
-    return
-  }
-
-  btn.disabled = true
-  btn.textContent = '翻译中…'
-  const unsub = window.paperlite.onTranslationProgress(({ done, total, kind }) => {
-    if (kind === 'interactive') btn.textContent = `翻译中 ${done}/${total}`
-  })
+  const seq = ++transFlowSeq
+  // 切换文献后旧流程作废：不再插入译文、不再改写按钮
+  const alive = (): boolean => seq === transFlowSeq
   try {
-    const result = await window.paperlite.translateParagraphs(missing, lang)
-    const items = missing
-      .map((text, i) => ({ text, trans: result[i] ?? '' }))
-      .filter((x) => x.trans)
-    void window.paperlite.translationsPut(items, lang)
-    for (const p of paras) {
-      const t = cached[p.text] ?? result[missing.indexOf(p.text)] ?? ''
-      if (t) insertTrans(p.bi, t)
+    const paras = paragraphIndexes()
+    if (paras.length === 0) return
+    const lang = getSettings().lang
+    const cached = await window.paperlite.translationsGet(paras.map((p) => p.text), lang)
+    if (!alive()) return
+    for (const p of paras) if (cached[p.text]) insertTrans(p.bi, cached[p.text])
+    const missing = paras.filter((p) => !cached[p.text])
+    // 一段译文都没有的文献不自动翻译（等用户点「译」，与原行为一致）；
+    // 只有「译了一部分」才在打开时自动补全
+    if (auto && missing.length === paras.length) return
+    const hadTrans = article.classList.contains('has-trans')
+    if (missing.length < paras.length) article.classList.add('has-trans')
+    if (missing.length === 0) {
+      // 译文齐全：自动恢复时显示，点击时切换显示/隐藏
+      if (auto || !hadTrans) article.classList.add('show-trans')
+      else article.classList.toggle('show-trans')
+      btn.classList.toggle('toggle-on', article.classList.contains('show-trans'))
+      btn.textContent = '已译'
+      return
     }
+    // 译文不全：先补翻缺失段。此前 has-trans 一置位就提前返回，缺失段
+    // 永远补不上，按钮停在「译 N/M」
     article.classList.add('has-trans', 'show-trans')
-    btn.textContent = '已译'
     btn.classList.add('toggle-on')
+    const doneCount = missing.length
+    const label = (done: number): string => `译 ${paras.length - doneCount + done}/${paras.length}`
+    btn.textContent = label(0)
+    const status = await window.paperlite.llmStatus()
+    if (!alive()) return
+    if (!status.hasKey) {
+      if (!auto) alert('部分段落无缓存译文，且未配置翻译 API Key（settings.json → llm.apiKey）。')
+      return
+    }
+    if (translatingReadingId === readingId) return
+    const runFor = readingId
+    translatingReadingId = readingId
+    transFills++
+    btn.disabled = true
+    // 主进程上报的 done/total 已含已有译文的段数（见 translateParagraphs 的 doneOffset）
+    const unsub = window.paperlite.onTranslationProgress(({ done, total, kind }) => {
+      if (kind === 'interactive' && alive()) btn.textContent = `翻译中 ${done}/${total}`
+    })
+    try {
+      // 同文段落只请求一次；offset 取「总段数 − 去重后的缺失数」，进度分母才是总段数
+      const texts = [...new Set(missing.map((p) => p.text))]
+      const result = await window.paperlite.translateParagraphs(texts, lang, paras.length - texts.length)
+      // 结果先入库：即使期间切换了文献，下次打开也直接命中缓存
+      void window.paperlite.translationsPut(
+        texts.map((text, i) => ({ text, trans: result[i] ?? '' })).filter((x) => x.trans),
+        lang
+      )
+      if (!alive()) return
+      const trans = new Map(texts.map((text, i) => [text, result[i] ?? '']))
+      for (const p of missing) {
+        const t = trans.get(p.text)
+        if (t) insertTrans(p.bi, t)
+      }
+      // 有批次失败时保留真实计数，再点一次按钮只补剩下的
+      const failed = missing.filter((p) => !trans.get(p.text)).length
+      btn.textContent = failed === 0 ? '已译' : label(doneCount - failed)
+      btn.title = failed === 0 ? TRANS_BTN_TITLE : '有段落没译成（翻译接口报错），点击重试补全'
+    } catch (err) {
+      console.error('[paperlite] 翻译失败', err)
+      if (!auto) alert('翻译失败：' + String(err))
+      if (alive()) btn.textContent = label(0)
+    } finally {
+      unsub()
+      transFills--
+      if (translatingReadingId === runFor) translatingReadingId = 0
+      btn.disabled = transFills > 0
+    }
   } catch (err) {
-    console.error('[paperlite] 翻译失败', err)
-    alert('翻译失败：' + String(err))
-    btn.textContent = '译'
-  } finally {
-    unsub()
-    btn.disabled = false
+    // 缓存不可用不影响阅读
+    console.warn('[paperlite] 译文缓存读取失败', err)
   }
 }
 

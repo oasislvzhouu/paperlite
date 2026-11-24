@@ -12,6 +12,17 @@ interface AnthropicResponse {
   error?: { message?: string }
 }
 
+/** 带 HTTP 状态码的 LLM 错误：429/5xx 是瞬时故障，可退避重试；
+ *  其余（401/400/超时/断网）重试没有意义 */
+class LlmHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message)
+  }
+}
+
 export function llmStatus(): LlmStatus {
   const { llm } = loadSettings()
   return { baseUrl: llm.baseUrl, model: llm.model, hasKey: llm.apiKey.length > 0 }
@@ -37,9 +48,16 @@ async function chat(prompt: string, maxTokens = 8192): Promise<string> {
     }),
     signal: AbortSignal.timeout(120_000)
   })
-  const data = (await res.json()) as AnthropicResponse
+  let data: AnthropicResponse
+  try {
+    data = (await res.json()) as AnthropicResponse
+  } catch (err) {
+    // 网关返回的非 JSON 错误页（502/503）：按状态码报错，调用方可据此重试
+    if (res.ok) throw err
+    data = {}
+  }
   if (!res.ok || data.error) {
-    throw new Error(`LLM ${res.status}: ${data.error?.message ?? res.statusText}`)
+    throw new LlmHttpError(res.status, `LLM ${res.status}: ${data.error?.message ?? res.statusText}`)
   }
   return (data.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('')
 }
@@ -239,10 +257,25 @@ export const LANG_NAMES: Record<string, string> = {
   ko: '한국어'
 }
 
+/** 限流/服务端错误后的重试等待（第 1、2 次重试前） */
+const RETRY_WAITS = [3000, 8000]
+const clock = (): string => new Date().toTimeString().slice(0, 8)
+
 export async function translateParagraphs(
   texts: string[],
   lang: string = 'zh-CN',
-  onProgress?: (done: number, total: number) => void
+  /** aborted=true：因接口持续报错提前结束（后面的批次没有请求） */
+  onProgress?: (done: number, total: number, aborted?: boolean) => void,
+  /** 已有译文的段数：进度按全篇段落计数（done/total 都加上它） */
+  doneOffset = 0,
+  hooks?: {
+    /** 取下一批前执行（后台预翻译在此让路给交互翻译） */
+    beforeBatch?: () => Promise<void>
+    /** 返回 true 表示该批次已被别的请求译好，跳过 */
+    skip?: (batch: string[]) => boolean
+    /** 每批译完立即回调（start 为该批在 texts 中的起点）：预翻译据此逐批入库 */
+    onBatch?: (start: number, results: string[]) => void
+  }
 ): Promise<string[]> {
   const langName = LANG_NAMES[lang] ?? LANG_NAMES['zh-CN']
   const out: string[] = new Array(texts.length).fill('')
@@ -254,12 +287,25 @@ export async function translateParagraphs(
   const CONCURRENCY = 4
   let cursor = 0
   let completed = 0
+  let ok = 0
+  let failed = 0
   const report = (): void => {
-    if (onProgress) onProgress(completed, texts.length)
+    if (onProgress) onProgress(doneOffset + completed, doneOffset + texts.length)
   }
   async function worker(): Promise<void> {
     while (cursor < jobs.length) {
+      // 连续两个批次失败且无一成功（密钥失效/断网/限流）：剩下的批次不会
+      // 更好，继续等只会让每个请求各挂到 120 秒超时、进度停住好几分钟
+      if (failed >= 2 && ok === 0) return
+      if (hooks?.beforeBatch) await hooks.beforeBatch()
+      // 让路期间其它 worker 可能已把批次取完，await 之后要重新判断
+      if (cursor >= jobs.length) return
       const job = jobs[cursor++]
+      if (hooks?.skip?.(job.batch)) {
+        completed += job.batch.length
+        report()
+        continue
+      }
       // 全局编号标记协议：每段带 [[N]]，LLM 输出按 [[N]] 配对回写。
       // 旧的等长 JSON 数组协议在 LLM 合并/拆分段落时产生错位污染
       const tagged = texts
@@ -272,26 +318,45 @@ export async function translateParagraphs(
         '（N 与输入一致，顺序不限），仅输出译文本身，不要解释。' +
         '保留数学符号与变量（如 x、α、Q-learning 不译）、保留引用标记（如 [8]、Fig. 2）。\n\n' +
         tagged
-      try {
-        const reply = await chat(prompt)
-        const re = /\[\[(\d{1,4})\]\]([\s\S]*?)(?=\[\[\d{1,4}\]\]|$)/g
-        let mm: RegExpExecArray | null
-        while ((mm = re.exec(reply))) {
-          const idx = Number(mm[1])
-          const val = mm[2].replace(/\s+/g, ' ').trim()
-          if (idx >= job.start && idx < job.start + job.batch.length && val && !out[idx]) {
-            out[idx] = val
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const reply = await chat(prompt)
+          const re = /\[\[(\d{1,4})\]\]([\s\S]*?)(?=\[\[\d{1,4}\]\]|$)/g
+          let mm: RegExpExecArray | null
+          while ((mm = re.exec(reply))) {
+            const idx = Number(mm[1])
+            const val = mm[2].replace(/\s+/g, ' ').trim()
+            if (idx >= job.start && idx < job.start + job.batch.length && val && !out[idx]) {
+              out[idx] = val
+            }
           }
+          if (out.slice(job.start, job.start + job.batch.length).some(Boolean)) ok++
+          break
+        } catch (err) {
+          // 限流（429）/服务端错误是瞬时的：退避后重试。实测 4 并发会触发
+          // 账户速率限制（1302），一批直接放弃就是 6 段没有译文
+          const status = err instanceof LlmHttpError ? err.status : 0
+          if ((status === 429 || status >= 500) && attempt <= RETRY_WAITS.length) {
+            const wait = RETRY_WAITS[attempt - 1] + Math.random() * 1500
+            console.log(
+              `${clock()} [paperlite-main] 翻译批次 @${job.start} 暂不可用（${status}），${Math.round(wait / 1000)} 秒后重试`
+            )
+            await new Promise((r) => setTimeout(r, wait))
+            continue
+          }
+          failed++
+          console.log(`${clock()} [paperlite-main] 翻译批次 @${job.start} 失败:`, err)
+          break
         }
-      } catch (err) {
-        console.log(`[paperlite-main] 翻译批次 @${job.start} 失败:`, err)
-      } finally {
-        completed += job.batch.length
-        report()
       }
+      completed += job.batch.length
+      report()
+      if (hooks?.onBatch) hooks.onBatch(job.start, out.slice(job.start, job.start + job.batch.length))
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, worker))
+  // 熔断提前结束：补一次终态上报，否则界面上的进度浮标会一直停在半截转圈
+  if (failed >= 2 && ok === 0 && onProgress) onProgress(doneOffset + completed, doneOffset + texts.length, true)
   return out
 }
 

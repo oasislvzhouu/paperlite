@@ -1,9 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist'
 import './worker-mgr'
 import './style.css'
-import { initReaderEvents, openReader } from './reader'
+import { extractReaderParagraphs, initReaderEvents, openReader } from './reader'
 import { initReadPrefs } from './settings'
-import { extractReflowBlocks } from './reflow'
 import type { ReadingMeta } from '../../shared/types'
 
 // worker 生命周期统一由 worker-mgr.ts 管理
@@ -147,23 +146,13 @@ async function warmupAllTranslations(): Promise<void> {
   }
 }
 
-/** 导入后后台预翻译：提取段落 → 主进程排队翻译并写入缓存库 */
+/** 导入后/启动后后台预翻译：按阅读器同一条管线提取段落 → 主进程排队翻译并写入缓存库。
+ *  段落原文必须与阅读器显示的逐字一致（缓存键），所以不能另走 pdf.js 文本层。 */
 async function prefetchTranslations(meta: ReadingMeta): Promise<void> {
   try {
-    const task = pdfjsLib.getDocument({
-      url: window.paperlite.pdfUrl(meta.id),
-      cMapUrl: 'assets/cmaps/',
-      cMapPacked: true,
-      standardFontDataUrl: 'assets/standard_fonts/',
-      isOffscreenCanvasSupported: false,
-    disableFontFace: true
-    })
-    const d = await task.promise
-    const blks = await extractReflowBlocks(d)
-    await task.destroy()
-    const texts = blks
-      .filter((b) => b.kind === 'paragraph' && b.text.length >= 40)
-      .map((b) => b.text)
+    const t0 = performance.now()
+    const texts = await extractReaderParagraphs(meta.id)
+    console.log(`[paperlite] 预翻译提取 id=${meta.id}：${texts.length} 段，${Math.round(performance.now() - t0)}ms`)
     if (texts.length > 0) {
       await window.paperlite.translationsPrefetch(texts)
     }
@@ -195,19 +184,27 @@ function init(): void {
   const chip = () => document.querySelector('#trans-status') as HTMLElement
   const chipText = () => document.querySelector('#trans-status-text') as HTMLElement
   let chipTimer: number | undefined
-  window.paperlite.onTranslationProgress(({ done, total, kind }) => {
+  const fadeChip = (delay: number): void => {
+    clearTimeout(chipTimer)
+    chipTimer = window.setTimeout(() => {
+      const c = chip()
+      c.classList.add('done')
+      window.setTimeout(() => (c.hidden = true), 450)
+    }, delay)
+  }
+  window.paperlite.onTranslationProgress(({ done, total, kind, aborted }) => {
     if (total <= 0) return
     const label = kind === 'prefetch' ? '后台预翻译' : 'AI 翻译'
     const c = chip()
     c.classList.remove('done')
     c.hidden = false
-    if (done >= total) {
+    if (aborted) {
+      // 接口持续报错被熔断：进度到不了 total，不收尾浮标会一直停在半截
+      chipText().textContent = `${label}中断：翻译接口持续报错，稍后重试`
+      fadeChip(5000)
+    } else if (done >= total) {
       chipText().textContent = `${label}完成 ✓ ${total} 段`
-      clearTimeout(chipTimer)
-      chipTimer = window.setTimeout(() => {
-        c.classList.add('done')
-        window.setTimeout(() => (c.hidden = true), 450)
-      }, 1800)
+      fadeChip(1800)
     } else {
       chipText().textContent = `${label} ${done}/${total} 段`
     }
