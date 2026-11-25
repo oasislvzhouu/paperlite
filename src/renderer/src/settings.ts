@@ -44,7 +44,7 @@ const KEY = 'pl.read.settings.v1'
 const DEFAULTS: ReadSettings = {
   theme: 'dark',
   font: 'ebgaramond',
-  size: 16,
+  size: 20,
   lh: 1.55,
   trans: 'block',
   lang: 'zh-CN',
@@ -104,6 +104,9 @@ export function applySettings(): void {
   const article = document.querySelector<HTMLElement>('#reflow-article')
   if (article) {
     article.style.setProperty('--reflow-font', `${state.size}px`)
+    // 公式基准字号跟随「默认」正文字号而不是当前字号：用户调大调小正文时
+    // 公式保持原尺寸，而默认设置下公式与正文的比例不变
+    article.style.setProperty('--reflow-base-font', `${DEFAULTS.size}px`)
     article.style.setProperty('--read-lh', String(state.lh))
     article.style.setProperty('--font-article', FONTS[state.font])
     article.dataset.transStyle = state.trans

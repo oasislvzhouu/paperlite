@@ -453,9 +453,11 @@ body.reflow-mode .zoomer { display: none; }
 }
 
 #reflow-article {
-  --reflow-font: 17px;
-  /* 栏宽按 16px 基准字号固定，字号增减不改变栏宽（图表/裁图不跟着缩放） */
-  --reflow-base-font: 16px;
+  /* 下面两个变量由 settings.ts 的 applySettings 写入，这里是与默认值相同的兜底 */
+  --reflow-font: 20px;
+  /* 公式基准字号 = 默认正文字号：不随用户调字号变化，公式保持原尺寸 */
+  --reflow-base-font: 20px;
+  /* 栏宽用固定 px：字号增减不改变栏宽（图表/裁图不跟着缩放） */
   --reflow-width: 896px;
   max-width: var(--reflow-width);
   margin: 28px auto 0;
